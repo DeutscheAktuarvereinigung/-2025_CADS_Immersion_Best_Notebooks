@@ -1,0 +1,2780 @@
+---
+title: "Actuarial Data Science Immersion - Ausarbeitung Teil 1"
+author: "Dietmar Hareter"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+  html_document:
+    number_sections: true
+    fig_caption: true
+    toc: true
+    fig_width: 10
+    fig_height: 6
+    theme: cosmo
+    highlight: tango
+    code_folding: hide
+---
+
+```{r setup, include = FALSE, echo = FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = TRUE,
+  error = FALSE)
+```
+
+# R0: Bibliotheken, Reproduzierbarkeit und zentrale Hilfsfunktionen
+
+Zunächst werden alle benötigten Pakete geladen, wichtige Punkte für die Reproduzierbarkeit aufgelistet, sowie die beiden Hilfsfunktionen aus SWoF definiert.
+
+## Laden der verwendete Pakete
+
+Wie in der Aufgabenstellung gefordert, werden nur die benötigten Pakete geladen
+
+```{r, message = FALSE}
+suppressPackageStartupMessages({
+  # Visualisierung
+  library(ggcorrplot) 
+  library(ggplot2) 
+  library(grid) 
+  
+  # Datenmanipulation
+  library(data.table)
+  library(dplyr) 
+  library(purrr)
+  library(rlang)
+  library(splitstackshape)
+  library(stringr) 
+  library(tibble) 
+  library(tidyr) 
+  
+  # Modellierung
+  library(caret) 
+  library(EIX)
+  library(glmnet)
+  library(hstats) 
+  library(mgcv)
+  library(MLmetrics) 
+  library(nnet)
+  library(xgboost) 
+})
+```
+
+## Reproduzierbarkeit
+
+Für die Reproduzierbarkeit werden folgende Punkte beachtet:
+
+-   Laden aller verwendeten Pakete - siehe voriger Abschnitt.
+-   Zufallszahlen werden mit *set.seed(...)* gesetzt.
+-   Verwendung der Funktion *sessionInfo()* am Ende des Notbooks, um alle technischen VOraussetzungen nachvollziehen zu können.
+-   Verwendung von relativen Pfaden bei der Einlese von Daten.
+-   Verwendung von *knitr::opts_chunk\$set()*.
+-   Falls die Ausarbeitung in einem Projekt verwaltet werden würde (das ist hier nicht der Fall) könnten mit *renv* die verwendeten Pakete reproduzierbar gemacht werden.
+
+## Definition der verwendeten Hilfsfunktionen
+
+Die beiden zentralen Hilfsfunktionen *multiplot* und *get_binCI* werden unverändert aus der Vorlage SWoF übernommen. In den  folgenden Abschnitten werden weitere Hilfsfunktionen definiert. Diese sind aber nicht als "zentral" anzusehen und werden deshalb erst an den entsprechenden Anwendungsstellen definiert.
+
+```{r}
+# Definition einer Funktion für mehrere Plots
+#
+# ggplot-Objekte können entweder direkt über „...“ oder über „plotlist“ (als Liste von ggplot-Objekten) übergeben werden.
+# - cols:   Anzahl der Spalten im Layout
+# - layout: Eine Matrix, die das Layout angibt. Wenn vorhanden, wird 'cols' ignoriert.
+#
+# Wenn das Layout zum Beispiel so aussieht: matrix(c(1,2,3,3), nrow=2, byrow=TRUE),
+# dann wird Plot 1 oben links, Plot 2 oben rechts und
+# Plot 3 über die gesamte untere Reihe angezeigt.
+#
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+
+  # Erstelle eine Liste aus den ...-Argumenten und der plotlist.
+  plots <- c(list(...), plotlist)
+
+  numPlots = length(plots)
+
+  # Wenn das Layout NULL ist, dann verwende 'cols' zur Bestimmung des Layouts
+  if (is.null(layout)) {
+    # Erstelle das Panel
+    # ncol: Anzahl der Spalten der Plots
+    # nrow: Benötigte Anzahl an Zeilen, berechnet anhand der Anzahl der Spalten
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Seite einrichten
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Darstellung jedes Plota in der richtigen Position
+    for (i in 1:numPlots) {
+      # Ermittlung der i,j Matrix-Position der Felder, die den Subplot enthalten.
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+
+# Funktion zur Ermittlung binomialer Konfidenzintervalle
+get_binCI <- function(x,n) as.list(setNames(binom.test(x,n)$conf.int, c("lwr", "upr")))
+```
+
+# R1: Datenaufbereitung
+
+## a) Daten einlesen
+
+```{r warning=FALSE, results=FALSE}
+diabetic_data_readin <- read.csv(file = "data/diabetic_data.csv", stringsAsFactors = TRUE) 
+```
+
+Der Datensatz enthält `r format(nrow(diabetic_data_readin), big.mark = ".", decimal.mark = ",", scientific = FALSE)` Zeilen und `r ncol(diabetic_data_readin)` Spalten.
+
+Die ersten zehn Einträge sind:
+
+```{r}
+head(diabetic_data_readin, n = 10) 
+```
+
+Für den Test, ob der Datensatz richtig eingelesen wurde, wird zunächst die Struktur der Daten geprüft. Insbesondere wird geprüft, ob alle Stings als Faktoren eingelesen wurden.
+
+```{r}
+str(diabetic_data_readin) 
+```
+
+Der Datensatz enthält kein Merkmal des Typs "character", d.h. alle Strings wurden als Faktoren eingelesen.
+
+Einen ersten Überblick über die einzelnen Merkmale gibt die Funktion *summary()*:
+
+```{r}
+summary(diabetic_data_readin)
+```
+
+Die Anzahl der tatsächlich fehlenden Daten is `r sum(is.na(diabetic_data_readin))`, wie folgende Auswertung zeigt:
+
+```{r}
+sum(is.na(diabetic_data_readin)) 
+```
+
+Ein Vorteil, wenn bei der Einlese der Daten keine *na.strings* verwendet werden (eine Vorgabe würde bedeuten, dass entsprechende Strings, wie beispielsweise ein Fragezeichen, bei der Einlese automatisch in einen *na*-Wert umgewandelt werden), ist, dass klar getrennt werden kann, ob Daten bereits im Datensatz selbst durch ein Fragezeichen als fehlend / na gekennzeichnet wurden, oder tatsächlich als Datenfeld fehlen (in diesem Fall wird der Wert bei der Einlese auf *na* gesetzt). Mit *sum(is.na())* kann die Anzahl der tatsächlich fehlenden Datensätze ermittelt werden. 
+
+Ein *na.string* könnte bei der Einlese folgendermaßen gesetzt werden:
+
+read.csv(file = "data/diabetic_data.csv", stringsAsFactors = TRUE, na.strings = "?") 
+
+Der Nachteil bei fehlender Verwendung von *na.string* ist, dass die entsprechenden Datenfelder nicht automatisch als fehlende Wert behandelt / umgewandelt werden und somit zwei Arten von fehlenden Werten (direkt im Datansatz, beispielsweise mit einem Fragezeichen gekennzeichnet, bzw. tatsächlich fehlende) im Datensatz vorkommen. Das könnte zu einer fehlerhaften Analyse führen, wenn nicht beide Arten von fehlenden Werten entsprechend berücksichtig werden.
+
+
+## b) Daten filtern
+
+Zunächst wird der Datensatz aufsteigend nach *patient_nbr* und dann nach *encounter_id* sortiert. Zur Überprüfung der korrekten Sortierung werden die ersten vier Spalten (damit die Anzeige in eine Zeile passt - die Darstellung aller Spalten ist für den Zweck nicht notwenig) der ersten 20 Beobachtungen ausgegeben und die entsprechenden *patient_nbr* gespeichert.
+
+```{r split=FALSE}
+diabetic_data_first <- diabetic_data_readin %>% 
+  dplyr::arrange(patient_nbr, encounter_id) 
+head(diabetic_data_first[,1:4], 20) 
+ 
+first_patient_nbr <- head(diabetic_data_first, 20) %>% 
+  dplyr::pull(patient_nbr) 
+```
+
+Filtern nach dem ersten Datensatz je *patient_nbr* mit der Funktion *slice_head* aus dem Paket *dplyr*:
+
+```{r}
+diabetic_data_first <- diabetic_data_first %>% 
+  dplyr::group_by(patient_nbr) %>% 
+  dplyr::slice_head(n = 1) %>% 
+  dplyr::ungroup() %>% 
+  data.frame() 
+ 
+diabetic_data_first %>%  
+  dplyr::filter(patient_nbr %in% first_patient_nbr) %>%
+  dplyr::select(dplyr::all_of(colnames(diabetic_data_readin)[1:4]))
+```
+
+Die obige Auswertung zeigt, dass von den ersten 20 Beobachtungen des ursprünglichen Datensatzes nur mehr 13 Beobachtungen im gefilterten Datensatz vorhanden sind. Diese Beobachtungen entsprechen den ersten Einträgen pro *patient_nbr* in der oberen Auswertung.
+
+Ein weiterer Test zur Überprüfung der Korrektheit der vorangegangenen Filterung ist, dass im gefilterten Datensatz jede *patient_nbr* nur mehr ein Mal vorkommt darf. Dafür wird mit Hilfe der Funktion *table()* die Anzahl der Datensätze je *patient_nbr*-Ausprägung ermittelt und das Maximum ausgegeben. 
+
+```{r}
+max(table(diabetic_data_first$patient_nbr)) 
+```
+
+Die obige Auswertung zeigt, dass jede *patient_nbr* nur mehr ein Mal im gefilterten Datensatz vorkommt.
+
+Im folgenden wird geprüft, ob jede *patient_nbr* im originalen Datensatz auch im gefilterten Datensatz enthalten ist.
+
+```{r}
+length(unique(diabetic_data_readin$patient_nbr)) == length(unique(diabetic_data_first$patient_nbr))
+```
+
+Ausschluss der Datensätze "Versterben" oder "Hospiz":
+
+```{r}
+diabetic_data <- diabetic_data_first %>% 
+  dplyr::filter(!(discharge_disposition_id %in% c(11, 13, 14, 19, 20, 21))) %>% 
+  dplyr::select(-encounter_id, -patient_nbr)
+```
+
+Die Aufteilung des Merkmals *discharge_disposition_id* im aufbereiteten Datensatz stimmt mit der in der Aufgabenstellung im Anhang 2 dargestellten Tabelle überein. 
+
+```{r}
+table(diabetic_data$discharge_disposition_id)  %>%
+  data.frame()
+```
+
+Der Datensatz hat die angegebene Größe von `r format(nrow(diabetic_data), big.mark = ".", decimal.mark = ",", scientific = FALSE)` Zeilen und `r ncol(diabetic_data)` Spalten.
+
+```{r}
+dim(diabetic_data) 
+```
+
+
+## c) Diagnosedaten analysieren
+
+**Analyse der Primärdiagnose *diag_1*:**
+
+```{r}
+analyse_diag_1 <- diabetic_data %>% 
+  dplyr::group_by(diag_1) %>% 
+  dplyr::reframe(anzahl = n()) %>% 
+  dplyr::arrange(desc(anzahl)) 
+```
+
+Es gibt insgesamt `r nrow(analyse_diag_1)` unterschiedliche Diagnosen *diag_1*, wobei `r paste0("'",as.character(analyse_diag_1$diag_1[1]),"'")` die häufigste Diagnose ist. `r nrow(analyse_diag_1 %>% dplyr::filter(anzahl < 10))` der Diagnosen kommen weniger als 10 Mal im Datensatz vor. 
+
+**Analyse der Zusatzdiagnose *diag_2*:**
+
+```{r}
+analyse_diag_2 <- diabetic_data %>% 
+  dplyr::group_by(diag_2) %>% 
+  dplyr::reframe(anzahl = n()) %>% 
+  dplyr::arrange(desc(anzahl)) 
+```
+
+Es gibt insgesamt `r nrow(analyse_diag_2)` unterschiedliche Diagnosen *diag_2*, wobei `r paste0("'",as.character(analyse_diag_2$diag_2[1]),"'")` die häufigste Diagnose ist. `r nrow(analyse_diag_2 %>% dplyr::filter(anzahl < 10))` der Diagnosen kommen weniger als 10 Mal im Datensatz vor. 
+
+**Analyse der Zusatzdiagnose *diag_3*:**
+
+```{r}
+analyse_diag_3 <- diabetic_data %>% 
+  dplyr::group_by(diag_3) %>% 
+  dplyr::reframe(anzahl = n()) %>% 
+  dplyr::arrange(desc(anzahl)) 
+```
+
+Es gibt insgesamt `r nrow(analyse_diag_3)` unterschiedliche Diagnosen *diag_3*, wobei `r paste0("'",as.character(analyse_diag_3$diag_3[1]),"'")` die häufigste Diagnose ist. `r nrow(analyse_diag_3 %>% dplyr::filter(anzahl < 10))` der Diagnosen kommen weniger als 10 Mal im Datensatz vor. 
+
+Eine hohe Anzahl von unterschiedlichen Diagnosen kann nicht sinnvoll in einem Diagramm dargestellt werden, da einerseits die einzelnen Ausprägungen - wie beispielsweise Balken - nicht mehr optisch unterscheidbar sind, andererseits sich die Beschriftungen überlappen und damit nicht mehr lesbar sein werden. Für den Fall einer hohen Anzahl von  unterschiedlichen Diagnosen / Ausprägungen kann lediglich ein Ausschnitt, beispielsweise die 20 häufigsten Werte, sinnvoll dargestellt werden. 
+
+Die hohe Anzahl von Diagnosen kann in der Modellierung problematisch sein, da möglicherweise für einzelne Ausprägung zu wenige Beobachtungen im Trainings-Datensatz vorliegen, um eine signifikante Aussage über den Einfluss auf die Zielvariable ableiten zu können. Die wenigen Beobachtungen können unter Umständen zu einer hohen Varianz der Zielvariablen und zu einer Instabilität des Modells führen.
+
+
+## d) Diagnosestammdaten aufbereiten 
+
+Die beiden Datensätze *CCS_mapping_ICD9.csv* und *CCS_categories_ICD9.csv* werden eingelesen, wie vorgegeben verknüpft, nach dem *ICD9-Code* sortiert und als CSV-Datei *icd9_data.csv* gespeichert.
+
+```{r}
+ccs_mapping <- read.csv2(file = "data/CCS_mapping_ICD9.csv", stringsAsFactors = TRUE) # Trennung ist ein Strichpunkt 
+ccs_categories <- read.csv2(file = "data/CCS_categories_ICD9.csv", stringsAsFactors = TRUE) %>% 
+  dplyr::select(-X) # Trennung ist ein Strichpunkt 
+ 
+icd9_data <- ccs_mapping %>% 
+  dplyr::left_join(ccs_categories, by = "category_id") %>% 
+  dplyr::arrange(code) %>% 
+  data.frame() 
+write.csv2(x = icd9_data, file = "data/icd9_data.csv", row.names = FALSE) 
+```
+
+Die Häufigkeitstabelle stimmt mit der in der Aufgabenstellung im Anhang 2 dargestellten Tabelle überein. 
+
+```{r}
+icd9_data %>% 
+  dplyr::group_by(group) %>% 
+  dplyr::reframe(anzahl = n()) %>% 
+  dplyr::arrange(group) %>%
+  data.frame()
+```
+
+
+## e) Diagnosegruppen zuspielen 
+
+Ermittlung eines Auszug aus den icd9-Daten, der nur mehr die Spalten *code* und *group* enthält:
+
+```{r}
+icd9 <- icd9_data %>% 
+  dplyr::select(code, group) 
+```
+
+
+Im nächsten Schritt werden alle Punkte "." in den Merkmalen *diag_1*, *diag_2* und *diag_3* entfernd. Nachdem alle drei Merkaml Faktoren sind, genügt es die entsprechenden Levels zu bereinigen. Anschließend wird geprüft, in wie vielen Ausprägungen / Levels nach der Bereinigung noch Punkte vorhanden sind (sollte 0 sein). 
+
+```{r split=FALSE}
+levels(diabetic_data$diag_1) <- stringr::str_remove_all(levels(diabetic_data$diag_1), "\\.") 
+levels(diabetic_data$diag_2) <- stringr::str_remove_all(levels(diabetic_data$diag_2), "\\.") 
+levels(diabetic_data$diag_3) <- stringr::str_remove_all(levels(diabetic_data$diag_3), "\\.") 
+ 
+sum(stringr::str_detect(diabetic_data$diag_1, "\\.")) 
+sum(stringr::str_detect(diabetic_data$diag_2, "\\.")) 
+sum(stringr::str_detect(diabetic_data$diag_3, "\\.")) 
+```
+
+Im nächsten Schritt werden die drei Diagnosegruppen *group_diag_1*, *group_diag_2* und *group_diag_3* im Datensatz erzeugt, sowie für jedes der drei Merkmale die Anzahl der fehlenden Werte *na* bzw. die Anzahl der *Other*-Einträge ermittelt. Diese Auswertung dient dazu, nach der Bereinigung der fehlenden Werte (mit Ersetzung durch *Other*) den Bereinigungsschritt überprüfen zu können. Für alle drei Merkmale muss nach der Bereinigung die Anzahl der *Other*-Einträge gleich der Summe aus *na* und *Other*-Einträgen vor der Bereinigung sein.
+
+```{r split=FALSE}
+diabetic_data_group <- diabetic_data %>% 
+  dplyr::left_join(icd9, by = c("diag_1" = "code")) %>% 
+  dplyr::rename(group_diag_1 = group) %>% 
+  dplyr::left_join(icd9, by = c("diag_2" = "code")) %>% 
+  dplyr::rename(group_diag_2 = group) %>% 
+  dplyr::left_join(icd9, by = c("diag_3" = "code")) %>% 
+  dplyr::rename(group_diag_3 = group) 
+
+sum(is.na(diabetic_data_group$group_diag_1)) 
+sum(is.na(diabetic_data_group$group_diag_2)) 
+sum(is.na(diabetic_data_group$group_diag_3)) 
+ 
+sum(diabetic_data_group$group_diag_1 == "Other", na.rm = TRUE) 
+sum(diabetic_data_group$group_diag_2 == "Other", na.rm = TRUE) 
+sum(diabetic_data_group$group_diag_3 == "Other", na.rm = TRUE) 
+```
+
+Das Merkmal *group_diag_1* hat nach dem *left_join* `r sum(is.na(diabetic_data_group$group_diag_1))` fehlende Werte und `r format(sum(diabetic_data_group$group_diag_1 == "Other", na.rm = TRUE), big.mark = ".", decimal.mark = ",", scientific = FALSE)` Datensätze mit *Other*.
+
+Das Merkmal *group_diag_2* hat nach dem *left_join* `r sum(is.na(diabetic_data_group$group_diag_2))` fehlende Werte und `r format(sum(diabetic_data_group$group_diag_2 == "Other", na.rm = TRUE), big.mark = ".", decimal.mark = ",", scientific = FALSE)` Datensätze mit *Other*.
+
+Das Merkmal *group_diag_3* hat nach dem *left_join* `r sum(is.na(diabetic_data_group$group_diag_3))` fehlende Werte und `r format(sum(diabetic_data_group$group_diag_3 == "Other", na.rm = TRUE), big.mark = ".", decimal.mark = ",", scientific = FALSE)` Datensätze mit *Other*.
+
+Die fehlenden Werte werden durch *Other* ersetzt:
+
+```{r}
+diabetic_data_group <- diabetic_data_group %>% 
+  dplyr::mutate(group_diag_1 = replace(group_diag_1, is.na(group_diag_1), "Other")) %>% 
+  dplyr::mutate(group_diag_2 = replace(group_diag_2, is.na(group_diag_2), "Other")) %>% 
+  dplyr::mutate(group_diag_3 = replace(group_diag_3, is.na(group_diag_3), "Other")) 
+ 
+sum(is.na(diabetic_data_group$group_diag_1)) 
+sum(is.na(diabetic_data_group$group_diag_2)) 
+sum(is.na(diabetic_data_group$group_diag_3)) 
+ 
+sum(diabetic_data_group$group_diag_1 == "Other", na.rm = TRUE) 
+sum(diabetic_data_group$group_diag_2 == "Other", na.rm = TRUE) 
+sum(diabetic_data_group$group_diag_3 == "Other", na.rm = TRUE) 
+```
+
+Das Merkmal *group_diag_1* hat nach dem Ersetzen `r sum(is.na(diabetic_data_group$group_diag_1))` fehlende Werte und `r format(sum(diabetic_data_group$group_diag_1 == "Other", na.rm = TRUE), big.mark = ".", decimal.mark = ",", scientific = FALSE)` Datensätze mit *Other*.
+
+Das Merkmal *group_diag_2* hat nach dem Ersetzen `r sum(is.na(diabetic_data_group$group_diag_2))` fehlende Werte und `r format(sum(diabetic_data_group$group_diag_2 == "Other", na.rm = TRUE), big.mark = ".", decimal.mark = ",", scientific = FALSE)` Datensätze mit *Other*.
+
+Das Merkmal *group_diag_3* hat nach dem Ersetzen `r sum(is.na(diabetic_data_group$group_diag_3))` fehlende Werte und `r format(sum(diabetic_data_group$group_diag_3 == "Other", na.rm = TRUE), big.mark = ".", decimal.mark = ",", scientific = FALSE)` Datensätze mit *Other*.
+
+Die Überprüfung der korrekten Zuweisung aus dem *icd9*-Datensatz erfolgt anhand der ersten beiden Beobachtungen:
+
+```{r}
+diabetic_data[1:2,]  
+diabetic_data_group[1:2,]  
+```
+
+Im folgenden werden nur die entscheidenden Merkmale der beiden Beobachtungen in den jeweiligen Datensätzen betrachtet:
+
+```{r}
+diabetic_data[1:2,] %>% 
+  dplyr::select(diag_1, diag_2, diag_3) 
+diabetic_data_group[1:2,] %>% 
+  dplyr::select(diag_1, group_diag_1, diag_2, group_diag_2, diag_3, group_diag_3) 
+```
+
+Die Zuweisung entspricht der Codierung im Datensatz *icd9*:
+
+```{r}
+icd9 %>%  
+  dplyr::filter(code %in% unlist(diabetic_data[1:2,] %>% dplyr::select(diag_1, diag_2, diag_3))) 
+```
+
+Im nächsten Schritt werden alle Variablen, die mit "_id" enden, in Faktoren umgewandelt. 
+
+```{r}
+diabetic_data_group <- diabetic_data_group %>% 
+  dplyr::mutate(dplyr::across(dplyr::ends_with("_id"), as.factor)) 
+ 
+diabetic_data_group %>% 
+  dplyr::select(dplyr::ends_with("_id")) %>% 
+  str() 
+``` 
+
+
+## f) Objektmerkmale bereinigen
+
+Zunächst werden alle Merkmale mit Type "Faktor" ermittelt und anschließend die drei Merkmale *diag_1*, *diag_2* und *diag_3* aus der Liste gelöscht. 
+
+```{r}
+faktor_col <- colnames(diabetic_data_group)[sapply(diabetic_data_group, is.factor)] 
+faktor_col <- faktor_col[!(faktor_col %in% c("diag_1", "diag_2", "diag_3"))] 
+```
+
+Der Datensatz wird wie vorgegeben bereinigt, indem alle Ausprägungen, die weniger als 10 Mal in einem Merkmal vorkommen, mit dem am häufigst vorkommenden Merkmal ersetzt werden. Zur späteren Ausgabe werden alle wesentlichen Informationen in einer Liste (*liste_bereinigung*) gespeichert.
+
+```{r}
+liste_bereinigung <- list() 
+ 
+diabetic_data_clean <- diabetic_data_group %>% 
+  dplyr::mutate(dplyr::across(dplyr::all_of(faktor_col), ~{ 
+ 
+    anzahl <- table(.x) # Übersicht über die Anzahl der verschiedenen Ausprägungen des Merkmals
+    unter_10 <- names(anzahl[anzahl < 10]) # Ermittelt die Namen der Ausprägungen, die weniger als 10 Mal vorkommen.
+ 
+    if (length(unter_10) > 0) { # Wenn es Ausprägungen gibt, die weniger als 10 Mal vorkommen (Liste der Namen ist nicht leer)
+      modalwert <- names(anzahl)[which.max(anzahl)] # Bestimmung der häufigsten Ausprägung
+       
+      liste_bereinigung[[cur_column()]] <<- data.frame( # Globale Variable ausserhalb der Schleife ... 
+        Merkmal = cur_column(), 
+        Haeufigster_Wert = modalwert, 
+        Ersetzter_Wert = unter_10 
+      ) 
+       
+      replaced <- as.character(.x) # Umwandlung der Faktor-Werte in Strings
+      replaced[replaced %in% unter_10] <- modalwert # Alle Ausprägungen in "unter_10" werden ersetzt
+      return(factor(replaced)) # Der Character-Vektor wird wieder in den Typ Faktor umgewandelt
+    } else { 
+      return(.x)   
+    } 
+  })) 
+```
+
+Die folgende Liste zeigt einer Übersicht mit dem Namen des Merkmals, den darin vorkommenden häufigsten Wert und den Ausprägungen, der mit dem häuigsten Wert ersetzt wurden. 
+
+```{r}
+dplyr::bind_rows(liste_bereinigung) %>%
+  data.frame()
+```
+
+Zur Überprüfung der obigen Bereinigung wird für jedes kategorielle Merkmal die minimale Anzahl der Ausprägungen ermittelt und die Liste aufsteigend sortiert.
+
+```{r}
+uebersicht <- NULL
+for (merkmal in faktor_col) {
+  df <- data.frame(
+    Merkmal = merkmal,
+    Min_Auspraegung = min(table(diabetic_data_clean[,merkmal]))
+  )
+  uebersicht <- rbind(uebersicht, df)
+}
+
+uebersicht %>%
+  dplyr::arrange(Min_Auspraegung)
+```
+
+Wie erwartet, ist die Anzahl der einzelnen Ausprägungen für jedes Merkmal 10 oder höher.
+
+
+## g) Datensätze für binäre und ternäre Klassifikation erzeugen
+
+Erzeugung des Datensatz *diabetic_data_ter* wie vorgegeben: 
+
+```{r}
+diabetic_data_ter <- diabetic_data_clean %>% 
+  dplyr::rename(TARGET = readmitted) %>% 
+  droplevels() 
+```
+
+Bemerkung: Aufgrund der im vorigen Abschnitt durchgeführten Art der Bereinigung, nämlich alle Faktor-Variablen zunächst in eine Charakter-Variable umzuwandeln, dann zu bereinigen und anschließend wieder in eine Faktor-Variable zurückzuwandeln, wäre die Funktion *droplevels()* zum Löschen nicht verwendeter Levels, nicht notwenig. Sie wird zu Sicherheit dennoch durchgeführt.
+
+Darstellung der ternären Zielvariable *TARGET* in einem Tortendiagramm:
+
+```{r}
+ddt_summary <- diabetic_data_ter %>% 
+  dplyr::count(TARGET) %>% 
+  dplyr::mutate( 
+    anteil = n / sum(n), 
+    text_label = paste0(TARGET, ": ", round(100 * anteil, 1), "%") 
+  ) 
+ 
+ggplot(ddt_summary, aes(x = "", y = anteil, fill = TARGET)) + 
+  geom_bar(stat = "identity", width = 1, color = "white") + 
+  coord_polar("y", start = 0) + 
+  geom_text(aes(label = text_label), position = position_stack(vjust = 0.5)) + 
+  labs(title = "Verteilung der ternären Zielvariable TARGET") +  
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Erzeugung des Datensatz *diabetic_data_bin* aus dem Datensatz *diabetic_data_ter* wie vorgegeben: 
+
+```{r}
+diabetic_data_bin <- diabetic_data_ter %>% 
+  dplyr::filter(!(TARGET == ">30")) %>% 
+  dplyr::mutate(TARGET = ifelse(TARGET == "<30", 1, 0)) %>% 
+  dplyr::mutate(TARGET = as.factor(TARGET)) %>% 
+  droplevels() 
+```
+
+Darstellung der binären Zielvariable *TARGET* in einem Tortendiagramm:
+
+```{r}
+ddb_summary <- diabetic_data_bin %>% 
+  dplyr::count(TARGET) %>% 
+  dplyr::mutate( 
+    anteil = n / sum(n), 
+    text_label = paste0(TARGET, ": ", round(100 * anteil, 1), "%") 
+  ) 
+ 
+ggplot(ddb_summary, aes(x = "", y = anteil, fill = TARGET)) + 
+  geom_bar(stat = "identity", width = 1, color = "white") + 
+  coord_polar("y", start = 0) + 
+  geom_text(aes(label = text_label), position = position_stack(vjust = 0.5)) + 
+  labs(title = "Verteilung der binären Zielvariable TARGET") +  
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Das Tortendiagramm zeigt, dass ein deutliches Ungleichgewicht / eine Imbalance in den Daten zugunsten der Ausprägung 0  vorliegt. Knapp 87% der Datensätze haben einen TARGET-Wert von 0, lediglich 13% haben einen TARGET-Wert von 1. 
+
+Aufgrund der vorliegenden Imbalance ist die Wahl des verwendeten Gütemaßes ein entscheidendes Kriterium: wird beispielsweise Accuracy (Genauigkeit) als Gütemaß herangezogen, so erreicht ein Modell mit konstanter Prognose 0 eine Genauigkeit von 87%. 
+
+Es wäre möglich bzw. zu überlegen, ob die Imbalance in den nachfolgenden Modellierungen bereits in den Parametern berücksichtigt werden sollte, da in vielen Modellen eine Gewichtung der einzelnen Beobachtungen als Parameter möglich ist.  
+
+Ausgabe der ersten 10 Zeilen des ausbereiteten Datensatzes und Speicherung in der Datei *diabetic_data_bin.csv* (wird im zweiten Aufgabenteil Python verwendet).
+
+```{r}
+head(diabetic_data_bin, 10) 
+   
+write.csv2(x = diabetic_data_bin, file = "data/diabetic_data_bin.csv", row.names = FALSE) 
+```
+
+
+
+# R2: Explorative Datenanalyse und Visualisierung 
+
+## a) 3 Overview
+
+Die folgende Übersicht aus der Funktion *summary()* zeigt, dass viele Variablen nach der Bereinigung nur mehr eine Ausprägung haben. Diese tragen keinen Mehrwert in den anschließenden Modellbildungen bei.  
+
+```{r}
+summary(diabetic_data_bin) 
+```
+
+Die Übersicht zeigt allerdings für viele kategoriellen Merkmale nicht, ob die in *Abschnitt 2.6 f)* durchgeführte Bereinigung (mindestens 10 Beobachtungen pro Ausprägung) erfolgreich war, da die einzelnen Merkmale nach der Anzahl der Ausprägungen absteigend geordnet und nur die sechs häufigsten Ausprägungen einzeln aufgelistet sind. Die restlichen Merkmale sind in der Gruppe *(Other)* zusammengefasst - siehe beispielsweise das Merkmal *age*, in der nur die häufigsten sechs Altersgruppen zu sehen sind und die restlichen Altersgruppen mit insgesamt 2.647 Beobachtungen, zusammengefasst wurden. Deshalb wurde die Analyse (mindestens 10 Beobachtungen pro Ausprägung) bereits im *Abschnitt 2.6 f)* durchgeführt. 
+
+```{r}
+glimpse(diabetic_data_bin) 
+```
+
+Der Datensatz *diabetic_data_bin* hat `r ncol(diabetic_data_bin)` Merkmale (inklusive der Variable *TARGET*), `r format(nrow(diabetic_data_bin), big.mark = ".", decimal.mark = ",", scientific = FALSE)` Beobachtungen und enthält nur Merkmale mit diskreter Ausprägung (kategorielle Merkmale oder Merkmale mit Integer-Werten).
+
+Für spätere Analysen wird eine Tabelle *merkmale_info* erstellt, die Informationen zum Typ und der Anzahl von verschiedenen Ausprägungen der einzelnen Merkmalen enthält.
+
+```{r}
+merkmale_info <- lapply(names(diabetic_data_bin), function(spaltenname) { 
+  spalte <- diabetic_data_bin[[spaltenname]] 
+  list( 
+    Merkmal = spaltenname, 
+    Typ = class(spalte), 
+    Anzahl = length(unique(spalte)) 
+  ) 
+}) 
+ 
+merkmale_info <- dplyr::bind_rows(merkmale_info) %>% 
+  dplyr::arrange(Typ, Anzahl) %>% 
+  data.frame()  
+
+merkmale_info
+```
+
+Die Tabelle zeigt, dass `r nrow(merkmale_info %>% dplyr::filter(Typ == "factor"))` kategorielle Merkmale und `r nrow(merkmale_info %>% dplyr::filter(Typ == "integer"))` numerische Merkmale im Datensatz vorhanden sind.
+
+
+## b) 4 Individual feature visualisations 
+
+Die bereits erwähnt, zeigt die Analyse von *merkmale_info* dass es nur zwei Arten von Merkmaltyp gibt: kategorielle bzw. numerische.
+
+Aus der obigen Analyse folgt die Einteilung der Merkmale in 5 Gruppen, wobei die weitaus größere kategorielle Gruppe in *eine Ausprägung*, *binäres Merkmal*, *mittler Anzahl von Ausprägungen* und *hohe Anzahl von Ausprägungen* unterteilt wird:
+
+-   Kategorielle (Faktor-) Variablen mit einer Ausprägung (Gruppe 1) 
+-   Kategorielle (Faktor-) Variablen mit zwei Ausprägungen (Gruppe 2) 
+-   Kategorielle (Faktor-) Variablen mit mehr als zwei und weniger als 10 Ausprägungen (Gruppe 3) 
+-   Kategorielle (Faktor-) Variablen mit 10 oder mehr Ausprägungen (Gruppe 4) 
+-   Integer-Variablen (Gruppe 5) 
+
+
+Für die weitere Verwendung wird die oben gewählt Gruppierung als zusätzliche Spalte in die Tabelle eingetragen *merkmale_info* eingetragen, wobei die Variablen *TARGET*, *diag_1*, *diag_2* und *diag_3* auf die Gruppe "Unbekannt" gesetzt werden.  
+
+```{r}
+merkmale_info <- merkmale_info %>% 
+  dplyr::mutate(Gruppe = dplyr::case_when( 
+    Merkmal %in% c("TARGET", "diag_1", "diag_2", "diag_3") ~ "Unbekannt", 
+    Typ == "factor" & Anzahl == 1 ~ "Gruppe_1", 
+    Typ == "factor" & Anzahl == 2 ~ "Gruppe_2", 
+    Typ == "factor" & Anzahl >= 3 & Anzahl < 10 ~ "Gruppe_3", 
+    Typ == "factor" & Anzahl >= 10 ~ "Gruppe_4", 
+    Typ == "integer" ~ "Gruppe_5", 
+    .default = "Unbekannt" 
+  )) 
+```
+
+Die Funktion *generate_plot* dient zum Erstellen der nachfolgenden Plots.
+
+```{r}
+generate_plot <- function(data_in, merkmale, plot_type = 1, nr_col = 4, use_log = 1, angle = 0) { 
+  # plot_type:
+  #    1 ... Bar-Plot
+  #    2 ... Bar-Plot mit factor-Umwandlung (für Integer-Variablen)
+  #    3 ... Kerndichteschätzer für kategorielle Merkmale
+  #    4 ... Kerndichteschätzer für Integer-Variablen
+
+  # use_log:
+  #    0 ... y-Achse wird linear dargestellt
+  #    1 ... y-Achse wird logarithmisch dargestellt
+  
+  # angle:
+  #    0 ... Die Beschriftung der x-Achse wird nicht gedreht
+  #    1 ... Die Beschriftung der x-Achse wird um 90 Grad gedreht
+  
+  plot_list <- list()
+  
+  for (Merkmal in merkmale) {
+    if (is.factor(data_in[,Merkmal])) {
+      if (nr_col > 1 & length(levels(data_in[,Merkmal])) > 5 & max(nchar(levels(data_in[,Merkmal]))) > 10) {
+        angle = 1
+      }
+    }
+    
+    if (plot_type == 1) {
+      plot_list[[Merkmal]] <- ggplot(data_in, aes(x = !!rlang::sym(Merkmal), fill = !!rlang::sym(Merkmal))) +
+        geom_bar() 
+    } else if (plot_type == 2) {
+      plot_list[[Merkmal]] <- ggplot(data_in, aes(x = !!rlang::sym(Merkmal), fill = as.factor(!!rlang::sym(Merkmal)))) +
+        geom_bar() 
+    } else if (plot_type == 3) {
+      tmp <- as.character(levels(data_in[,Merkmal]))
+      data_in[,Merkmal] <- as.numeric(data_in[,Merkmal])
+      plot_list[[Merkmal]] <- ggplot(data_in, aes(x = !!rlang::sym(Merkmal))) +
+        geom_density() +
+        scale_x_continuous(breaks = 1:length(tmp), labels = tmp)
+    } else if (plot_type == 4) {
+      plot_list[[Merkmal]] <- ggplot(data_in, aes(x = !!rlang::sym(Merkmal))) +
+        geom_density()
+    } 
+    
+    plot_list[[Merkmal]] <- plot_list[[Merkmal]] +
+      theme(legend.position = "none",
+            panel.background = element_rect(fill = "white", color = NA),
+            plot.background = element_rect(fill = "white", color = NA))
+    
+    if (angle == 1) {
+      plot_list[[Merkmal]] <- plot_list[[Merkmal]] +
+        theme(axis.text.x = element_text(angle = 90))
+    }
+    
+    if (use_log == 1) {
+      plot_list[[Merkmal]] <- plot_list[[Merkmal]] +
+        scale_y_log10() +
+        ylab("count (log)")
+    }
+  }
+  
+  number_plots <- length(plot_list)
+  nr_row <- ceiling(number_plots/nr_col)
+  layout <- matrix(1:(nr_row*nr_col), nr_row, nr_col, byrow = TRUE)
+  p <- multiplot(plotlist = plot_list, layout=layout)
+  
+  return(p)
+} 
+```
+
+Bemerkung zu den folgenden Grafiken: 
+
+-   Wie in der Aufgabenstellung gefordert, wird die aus SWoF übernommene Funktion *multiplot* für die Darstellung der Grafiken verwendet. Damit die einzelnen Ausprägungen der Merkmale lesbar bleiben, wird die einfache Darstellungs-Form pro Merkmal aus SWoF übernommen (d.h. nur Beschriftung der x- und y-Achse, aber kein Titel, ... pro Grafik).
+-   Damit die einzelnen Grafiken nicht für jedes Merkmal einzeln definiert werden müssen, wird die oben definierte Funktion *generate_plot* verwendet. Die aus SWoF übernommene Funktion *multiplot* wird darin aufgerufen.
+-   Für die Darstellung der jeweiligen Merkmale wurde ein Histogramm UND Kerndichteschätzerplot gefordert. Für beispielsweise binäre kategorielle Merkmale ist der Erkenntnissgewinn aus dem Kerndichteschätzer gering, der Vollständigkeitshalber werden sie gemacht. 
+-   Die Histrogramme werden in Form eines Bar-Plots dargestellt. In *R* wird zwischen den Funktionen *geom_bar* und *geom_histogram* unterschieden, *geom_histogram* ist allerdings nur für stetige Variablen geeignet.
+
+**Generelle Bemerkung**: Im Gegensatz zur Vorlage SWoF kommen im vorliegenden Datensatz keine numerischen (float) Werte vor, d.h. die Abschnitte 4.7 und 4.8 sind nicht anwendbar. Falls die in diesen beiden Abschnitten betrachteten Histogramme die Kerndichteschätzer sein sollten, wurde die Aufgabenstellung von mir leider missverstanden und ich bitte vielmals um Entschuldigung - in der weiteren Ausarbeitung wurden eigene Kerndichteschätzer berechnet.
+
+**Einzelne Ausprägung (Gruppe 1)**
+
+Der Plot dieser Gruppe ist wenig aussagekräftig, er wird allerdings aus Vollständigkeitsgründen gemacht. 
+
+```{r}
+plot_data <- diabetic_data_bin %>% 
+  dplyr::select( 
+    dplyr::all_of(merkmale_info %>% 
+                    dplyr::filter(Gruppe == "Gruppe_1") %>% 
+                    dplyr::pull(Merkmal)))  
+tmp <- generate_plot(plot_data, merkmale = colnames(plot_data), plot_type = 1, nr_col = 4, use_log = 0) 
+```
+
+**Binäre kategorielle Variablen (Gruppe 2)**
+
+Histogramm
+
+```{r}
+plot_data <- diabetic_data_bin %>% 
+  dplyr::select( 
+    dplyr::all_of(merkmale_info %>% 
+                    dplyr::filter(Gruppe == "Gruppe_2") %>% 
+                    dplyr::pull(Merkmal))) 
+ 
+tmp <- generate_plot(plot_data, merkmale = colnames(plot_data), plot_type = 1, nr_col = 4, use_log = 1) 
+```
+
+Die Darstellung der Histogramme erfolgt mit logarithmierter y-Achse und zeigt, dass viele der binären kategoriellen Merkmale sehr unbalanciert sind und bei vielen die Ausprägung *No* überwiegt. Für einige der Variablen, wie beispielsweise *tolbutamide* und *miglitol* sollte geprüft werden, ob diese in der Modellierung sinnvoll verwendet werden können, da die Ausprägung *Steady* lediglich 10 Mal beobachtet wurde.
+
+Kerndichteschätzer
+
+```{r}
+tmp <- generate_plot(plot_data, merkmale = colnames(plot_data), plot_type = 3, nr_col = 4, use_log = 0) 
+```
+
+Die Kerndichteschätzer zeigen den aufgrund der Histogramme "erwarteten" Verlauf, wobei bei den unbalancierten Merkmalen fast die gesamte Dichte auf der Ausprägung *No* liegt.
+
+**Kategorielle Variablen mit mehr als zwei und weniger als 10 Ausprägungen (Gruppe 3)**
+
+Histogramm
+
+```{r}
+plot_data <- diabetic_data_bin %>% 
+  dplyr::select( 
+    dplyr::all_of(merkmale_info %>% 
+                    dplyr::filter(Gruppe == "Gruppe_3") %>% 
+                    dplyr::pull(Merkmal))) 
+ 
+tmp <- generate_plot(plot_data, merkmale = colnames(plot_data)[1:8], plot_type = 1, nr_col = 4, use_log = 1) 
+tmp <- generate_plot(plot_data, merkmale = colnames(plot_data)[9:15], plot_type = 1, nr_col = 4, use_log = 1) 
+```
+
+Die Darstellung der Histogramme erfolgt mit logarithmierter y-Achse und zeigt, dass die kategoriellen Merkmale mit mehr als zwei und weniger als 10 Ausprägungen unbalanciert sind und bei vielen die Ausprägung *No* bzw. *None* überwiegt. Dennoch ist in keinem der Merkmale die maximale Ausprägung so dominierend, dass der Fit der einzelnen Parameter problematisch / technisch instabil sein könnte.
+
+Kerndichteschätzer
+
+```{r}
+tmp <- generate_plot(plot_data, merkmale = colnames(plot_data)[1:8], plot_type = 3, nr_col = 4, use_log = 0) 
+tmp <- generate_plot(plot_data, merkmale = colnames(plot_data)[9:15], plot_type = 3, nr_col = 4, use_log = 0) 
+```
+
+Die Kerndichteschätzer zeigen den aufgrund der Histogramme "erwarteten" Verlauf, wobei bei den unbalancierten Merkmalen die gesamte Dichte auf der Ausprägung *No* bzw. *None* liegt.
+
+**Kategorielle Variablen mit 10 oder mehr Ausprägungen (Gruppe 4)**
+
+Histogramm
+
+```{r}
+plot_data <- diabetic_data_bin %>% 
+  dplyr::select( 
+    dplyr::all_of(merkmale_info %>% 
+                    dplyr::filter(Gruppe == "Gruppe_4") %>% 
+                    dplyr::pull(Merkmal))) 
+ 
+tmp <- generate_plot(plot_data, merkmale = colnames(plot_data)[1:2], plot_type = 1, nr_col = 1, use_log = 0) 
+tmp <- generate_plot(plot_data, merkmale = colnames(plot_data)[3:4], plot_type = 1, nr_col = 1, use_log = 0) 
+tmp <- generate_plot(plot_data, merkmale = colnames(plot_data)[5:7], plot_type = 1, nr_col = 2, use_log = 1) 
+tmp <- generate_plot(plot_data, merkmale = colnames(plot_data)[8], plot_type = 1, nr_col = 1, use_log = 1, angle = 1) 
+```
+
+Die Darstellung des Histogrammes der unteren 4 Merkmale erfolgt mit logarithmierter y-Achse, die restlichen Histogramme haben eine lineare y-Achse. Im Merkmal *discharge_disposition_id* ist die Ausprägung *1* dominierend.
+
+Die Ausprägungen "n.a." in den drei Merkmalen *group_diag_1*, *group_diag_2* und *group_diag_3* sind keine Datenfehler im Sinne von fehlenden Werten im Data-Frame, sondern kommen aus den ursprünglichen Merkmalen *diag_1*, *diag_2* bzw. *diag_3*, die Fragezeichen (?) enthalten. Diese Fragezeichen entsprechen im *icd9*-Datensatz einem "n.a.".
+
+Kerndichteschätzer
+
+
+```{r}
+tmp <- generate_plot(plot_data, merkmale = colnames(plot_data)[1:2], plot_type = 3, nr_col = 1, use_log = 0) 
+tmp <- generate_plot(plot_data, merkmale = colnames(plot_data)[3:4], plot_type = 3, nr_col = 1, use_log = 0) 
+tmp <- generate_plot(plot_data, merkmale = colnames(plot_data)[5:7], plot_type = 3, nr_col = 2, use_log = 0) 
+tmp <- generate_plot(plot_data, merkmale = colnames(plot_data)[8], plot_type = 3, nr_col = 1, use_log = 0, angle = 1) 
+```
+
+Die Kerndichteschätzer zeigen den aufgrund der Histogramme "erwarteten" Verlauf.
+
+
+**Integer-Variablen (Gruppe 5)**
+
+Histogramm
+
+```{r}
+plot_data <- diabetic_data_bin %>% 
+  dplyr::select( 
+    dplyr::all_of(merkmale_info %>% 
+                    dplyr::filter(Gruppe == "Gruppe_5") %>% 
+                    dplyr::pull(Merkmal))) 
+ 
+tmp <- generate_plot(plot_data, merkmale = colnames(plot_data)[1:4], plot_type = 2, nr_col = 2, use_log = 1) 
+tmp <- generate_plot(plot_data, merkmale = colnames(plot_data)[5:8], plot_type = 2, nr_col = 2, use_log = 1) 
+```
+
+Die Darstellung der Histogramme erfolgt mit logarithmierter y-Achse und zeigen in den zwei Merkmalen *number_emergency* und *number_outpatient* Ausreißer (wenige Beobachtungen mit einer deutlich höherer Zahl als der Rest).
+
+Kerndichteschätzer
+
+```{r}
+tmp <- generate_plot(plot_data, merkmale = colnames(plot_data)[1:4], plot_type = 4, nr_col = 2, use_log = 0) 
+tmp <- generate_plot(plot_data, merkmale = colnames(plot_data)[5:8], plot_type = 4, nr_col = 2, use_log = 0) 
+```
+
+Die Kerndichteschätzer zeigen den aufgrund der Histogramme "erwarteten" Verlauf.
+
+**TARGET-Variable**
+
+Im Folgenden wird zur Vollständigkeit die Verteilung der TARGET-Variable dargestellt und zeigt nochmals die bereits aus dem Tortendiagramm bekannte deutliche Imbalance zugunsten der Ausprägung "0".
+
+```{r}
+diabetic_data_bin %>% 
+  ggplot(aes(TARGET, fill = TARGET)) + 
+  geom_bar() + 
+  theme(legend.position = "none",
+        plot.title = element_text(hjust = 0.5),
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.background = element_rect(fill = "white", color = NA)) +
+  labs(title = "Verteilung der binären Zielvariable TARGET")
+```
+
+
+## c) 5 Claim rates for individual features 
+
+**Bemerkung**: Die nachfolgenden Aussagen zu den einzelnen Merkmalen basieren auf folgenden Überlegungen:
+
+-   Wenn für ein Merkmal die Durchschnittswerte der Zielvariable (Wiedereinweisungsquote) stark variieren, könnte dies ein Hinweis sein, dass dieses Merkmal signifikant für die Erklärung der Zielvariable ist. Ist der Durschnittswert der Zielvariable für alle Ausprägungen fast gleich, könnte das ein Hinweis sein, dass das entsprechende Merkmal wenig zur Erklärung der Zielvariable beiträgt (nicht signifikant ist)
+-   Wenn ein Merkmal eine hohe Streuung der Zielvariable innerhalb einer Ausprägung hat, kann das ein Hinweis sein, dass dieses Merkmal nicht signifikant für die Prognose der Zielvariable ist, da keine klare Beziehung zur Zielvariable vorliegt. Bei hoher Streuung ist es schwierig, präzise Prognosen zu treffen.
+-   Eine niedrige Streuung in den einzelnen Ausprägungen eines Merkmals bei gleichzeitig hoher Differenz im Durchschnittswert der Zielvariable weist tendenziell auf eine hohe Signifikanz des Merkmals zur Prognose der Zielvariable hin.
+-   Die obenstehenden Aussagen beziehen sich nur auf die einzelnen Merkmale selbst. Erfüllt ein Merkmal alle Voraussetzungen für hohe Signifikanz aber hat eine hohe Korrelation mit anderen Merkmalen, könnte es trotzdem redundant und wenig signifikant sein.
+
+Die Funktion *generate_plot_claims* dient zur Erzeugung der nachfolgenden Plots.
+
+```{r}
+generate_plot_claims <- function(data_in, merkmale, plot_type = 1, nr_col = 4, angle = 0) { 
+  # plot_type: 
+  #   1 ... Bar-Plot 
+  #   2 ... Scatter-Plot 
+  
+  # angle:
+  #    0 ... Die Beschriftung der x-Achse wird nicht gedreht
+  #    1 ... Die Beschriftung der x-Achse wird um 90 Grad gedreht
+
+  plot_list <- list() 
+   
+  merkmale_loop <- merkmale[!(merkmale == "TARGET")] 
+   
+  for (Merkmal in merkmale_loop) { 
+    if (is.factor(data_in[,Merkmal])) {
+      if (nr_col > 1 & length(levels(data_in[,Merkmal])) > 5 & max(nchar(levels(data_in[,Merkmal]))) > 10) {
+        angle = 1
+      }
+    }
+    
+    plot_list[[Merkmal]] <- data_in %>% 
+      dplyr::group_by(!!rlang::sym(Merkmal), TARGET) %>% 
+      dplyr::count() %>% 
+      tidyr::pivot_wider(names_from = TARGET, values_from = n, values_fill = 0) %>% 
+      dplyr::mutate(frac_claim = `1`/(`1`+`0`)*100, 
+                    lwr = get_binCI(`1`,(`1`+`0`))[[1]]*100, 
+                    upr = get_binCI(`1`,(`1`+`0`))[[2]]*100) %>% 
+      ggplot(aes(!!rlang::sym(Merkmal), frac_claim, fill = !!rlang::sym(Merkmal))) + 
+      geom_errorbar(aes(ymin = lwr, ymax = upr), width = 0.5, linewidth = 0.7, color = "gray30") + 
+      theme(legend.position = "none") + 
+      labs(y = "Claims [%]") 
+     
+    if (plot_type == 1) { 
+      plot_list[[Merkmal]] <- plot_list[[Merkmal]] + 
+        geom_col() 
+    } else if (plot_type == 2) { 
+      plot_list[[Merkmal]] <- plot_list[[Merkmal]] + 
+        geom_point(color = "orange") 
+    }  
+     
+    plot_list[[Merkmal]] <- plot_list[[Merkmal]] + 
+      theme(legend.position = "none",
+            panel.background = element_rect(fill = "white", color = NA),
+            plot.background = element_rect(fill = "white", color = NA)) 
+     
+    if (angle == 1) { 
+      plot_list[[Merkmal]] <- plot_list[[Merkmal]] + 
+        theme(axis.text.x = element_text(angle = 90)) 
+    } 
+  } 
+   
+  number_plots <- length(plot_list) 
+  nr_row <- ceiling(number_plots/nr_col) 
+  layout <- matrix(1:(nr_row*nr_col), nr_row, nr_col, byrow = TRUE) 
+  p <- multiplot(plotlist = plot_list, layout=layout) 
+   
+  return(p) 
+} 
+ 
+```
+
+**Einzelne Ausprägung (Gruppe 1)**
+
+Der Plot dieser Gruppe ist wenig aussagekräftig, er wird allerdings aus Vollständigkeitsgründen gemacht. 
+
+```{r}
+plot_data <- diabetic_data_bin %>% 
+  dplyr::select( 
+    dplyr::all_of(merkmale_info %>% 
+                    dplyr::filter(Gruppe == "Gruppe_1" | Merkmal == "TARGET") %>% 
+                    dplyr::pull(Merkmal))) 
+merkmale <- colnames(plot_data) 
+merkmale <- merkmale[!(merkmale == "TARGET")] 
+ 
+tmp <- generate_plot_claims(plot_data, merkmale = merkmale, plot_type = 1, nr_col = 4) 
+```
+
+**Binäre kategorielle Variablen (Gruppe 2)**
+
+```{r}
+plot_data <- diabetic_data_bin %>% 
+  dplyr::select( 
+    dplyr::all_of(merkmale_info %>% 
+                    dplyr::filter(Gruppe == "Gruppe_2" | Merkmal == "TARGET") %>% 
+                    dplyr::pull(Merkmal))) 
+merkmale <- colnames(plot_data) 
+merkmale <- merkmale[!(merkmale == "TARGET")] 
+ 
+tmp <- generate_plot_claims(plot_data, merkmale = merkmale, plot_type = 1, nr_col = 4) 
+```
+
+Die Merkmale *change* und *diabetesMed* zeigen eine geringe Streuung der Zielvariable bei gleichzeitig hohem Unterschied im Durchschnitt. Diese Merkmale können eine hohe Signifikanz in der Modellierung haben. Die hohe Streuung in allen Ausprägung *Steady* kann auf die geringe Anzahl von Beobachtungen zurückzuführen sein (siehe Grafiken im vorigen Abschnitt).
+
+**Kategorielle Variablen mit mehr als zwei und weniger als 10 Ausprägungen (Gruppe 3)**
+
+```{r}
+plot_data <- diabetic_data_bin %>% 
+  dplyr::select( 
+    dplyr::all_of(merkmale_info %>% 
+                    dplyr::filter(Gruppe == "Gruppe_3" | Merkmal == "TARGET") %>% 
+                    dplyr::pull(Merkmal))) 
+merkmale <- colnames(plot_data) 
+merkmale <- merkmale[!(merkmale == "TARGET")] 
+ 
+tmp <- generate_plot_claims(plot_data, merkmale = merkmale[1:8], plot_type = 1, nr_col = 4) 
+tmp <- generate_plot_claims(plot_data, merkmale = merkmale[9:15], plot_type = 1, nr_col = 4) 
+```
+
+Einige Merkmale zeigen deutlich Differenzen im Durchschnitt bei geringer Streuung, beispielsweise das Gewicht (*weight*). Allerdings zeigen speziell für *weight* die Ergebnisse aus dem vorigen Abschnitt, dass bei vielen der Beobachtungen das Gewicht unbekannt ist (*?*) und die einzelnen Gruppen wenig Beobachtungen haben. Ähnliches ist es beim Merkmal *repaglinide*, das deutliche Differenzen im Durchschnitt hat, aber von der Ausprägung *No* dominiert wird.
+
+**Kategorielle Variablen mit 10 oder mehr Ausprägungen (Gruppe 4)**
+
+```{r}
+plot_data <- diabetic_data_bin %>% 
+  dplyr::select( 
+    dplyr::all_of(merkmale_info %>% 
+                    dplyr::filter(Gruppe == "Gruppe_4" | Merkmal == "TARGET") %>% 
+                    dplyr::pull(Merkmal))) 
+merkmale <- colnames(plot_data) 
+merkmale <- merkmale[!(merkmale == "TARGET")] 
+ 
+tmp <- generate_plot_claims(plot_data, merkmale = merkmale[1:2], plot_type = 1, nr_col = 1) 
+tmp <- generate_plot_claims(plot_data, merkmale = merkmale[3:4], plot_type = 1, nr_col = 1) 
+tmp <- generate_plot_claims(plot_data, merkmale = merkmale[5:7], plot_type = 1, nr_col = 2) 
+tmp <- generate_plot_claims(plot_data, merkmale = merkmale[8], plot_type = 1, nr_col = 1, angle = 1) 
+```
+
+Die Merkmale *age*, *group_diag_1*, *group_diag_2*, *group_diag_3*, *discharge_disposition_id* und *admission_source_id* könnten nach dem Überlegungen zu Beginn des Abschnitts signifikant in der Modellierung sein, da sie (relativ) niedrige Streuung bei unterschiedlichen Durchschnittswerten zeigen. 
+
+**Integer-Variablen (Gruppe 5)** 
+
+```{r}
+plot_data <- diabetic_data_bin %>% 
+  dplyr::select( 
+    dplyr::all_of(merkmale_info %>% 
+                    dplyr::filter(Gruppe == "Gruppe_5" | Merkmal == "TARGET") %>% 
+                    dplyr::pull(Merkmal))) 
+merkmale <- colnames(plot_data) 
+merkmale <- merkmale[!(merkmale == "TARGET")] 
+ 
+tmp <- generate_plot_claims(plot_data, merkmale = merkmale[1:4], plot_type = 2, nr_col = 2) 
+tmp <- generate_plot_claims(plot_data, merkmale = merkmale[5:8], plot_type = 2, nr_col = 2) 
+```
+
+Die Merkmale *number_inpatient*, *time_in_hospital*, *number_diagnoses* und *num_medications* zeigen in den Bereichen mit einer hohen Anzahl von Beobachtungen (siehe vorigen Abschnitt) eine geringe Streuung der Zielvariablen bei unterschiedlichen Durchschnittswerten und könnten sigifikant für die Modellierung sein.
+
+
+## c) 6 Multi-feature comparisons 
+
+Zur Erstellung der Korrelationsmatrix werden nur jene Merkmale berücksichtig, die mehr als eine Ausprägung haben.
+
+```{r}
+diabetic_data_bin_num <- diabetic_data_bin %>% 
+  dplyr::select(
+    dplyr::all_of(merkmale_info %>% 
+                    dplyr::filter(Gruppe != "Gruppe_1") %>% 
+                    dplyr::pull(Merkmal))) 
+ 
+diabetic_data_bin_num <-  
+  data.frame(lapply(diabetic_data_bin_num, function(x) { 
+    if (is.factor(x)) { 
+      as.integer(x) 
+    } else { 
+      x 
+    } 
+  })) %>%
+  dplyr::select(TARGET, dplyr::everything())
+
+corr_matrix <- cor(diabetic_data_bin_num)
+ggcorrplot::ggcorrplot(corr_matrix, lab = FALSE, tl.cex = 8) + 
+  labs(title = "Korrelationsmatrix aller Merkmale") + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+Die Korrelationsmatix ist aufgrund der hohen Anzahl an Merkmalen unübersichtlich. Deshalb werden im nächsten Schritt nur jede Merkmale gefiltert, die mit zumindest einem anderen Merkmal eine hohe Korrelation (positiv oder negativ) aufweisen. Diese Merkmale werden in einer neuen Korrelationsmatrix übersichtlicher dargestellt. Als Schwellwert für die Korrelation wird 0.25 verwendet.  
+
+```{r}
+schwellwert <- 0.25
+high_corr <- (abs(corr_matrix) >= schwellwert) & (corr_matrix != 1)
+high_corr_pairs <- which(high_corr, arr.ind = TRUE)
+
+ggcorrplot::ggcorrplot(cor(diabetic_data_bin_num[,unique(rownames(high_corr_pairs))]), lab = FALSE, tl.cex = 10) +
+  labs(title = "Korrelationsmatrix aller Merkmale mit abs(cor) > 0.25")
+```
+
+Die *TARGET*-Variable ist in dieser Auswertung nicht enthalten, d.h. keines der Merkmale hat eine stärkere Korrelation (Schwellwert `r schwellwert`) mit der Zielvariable. Damit kann ausschließlich aus der Korrelations-Analyse keine Aussage über signifikante Merkmale für die Prognose der Zielvariable getroffen werden.
+
+Eine Korrelation (absolut) größer als 0.5 weisen nur zwei Merkmalpaare auf, wie folgende Auswertung bzw. Grafik zeigt (*admission_source_id* mit *admission_type_id* bzw. *change* mit *diabetesMed*): 
+
+```{r}
+schwellwert <- 0.5
+high_corr <- (abs(corr_matrix) >= schwellwert) & (corr_matrix != 1)
+high_corr_pairs <- which(high_corr, arr.ind = TRUE)
+
+ggcorrplot::ggcorrplot(cor(diabetic_data_bin_num[,unique(rownames(high_corr_pairs))]), lab = FALSE, tl.cex = 10) +
+  labs(title = "Korrelationsmatrix aller Merkmale mit abs(cor) > 0.5")
+```
+
+Insgesamt zeigen sich, dass die Merkmale untereinander wenig korreliert sind, bzw. nur eine gringe Korrelation mit der Zielvariable *TARGET* ausweisen.
+
+
+# R3: Datenaufteilung und XGBoost 
+
+## a) Datenaufteilung 
+
+*Stratifizierter Split* des gesamten Datensatz in einen Trainings-, Validierungs- und Testdatensatz bedeutet, dass annähernd dieselbe prozentuale Aufteilung der Ausprägungen der betrachteten Splitvariable im  Trainings-, Validierungs- und Testdatensatz vorhanden sind. In unserem Fall soll für die Variable *TARGET* diese Vorgabe erfüllt sein. 
+
+Nachdem zwei Datensätze - *diabetic_data_ter* und *diabetic_data_bin* - aufgeteilt werden müssen, wird eine Split-Funktion definiert bzw. verwendet. 
+
+
+```{r}
+split_data <- function(data) { 
+  # Für die Reproduzierbarkeit wird vor dem zufälligen Ziehen in der Funktion "stratified" der Zufallsgenerator gesetzt. 
+  # Für die Überprüfung des Splits wird eine Nummerierungs-Spalte eingefügt, die danach wieder gelöscht wird. 
+
+  rueckgabe <- list()   
+   
+  data_num <- data %>% 
+    dplyr::mutate(nr = 1:n())  
+   
+  set.seed(1234) 
+  list_split <- splitstackshape::stratified(data_num, "TARGET", 0.7, bothSets = TRUE) 
+  train_data <- list_split$SAMP1 %>% 
+    data.frame() 
+  
+  # Nach dem ersten Split enthält das Listenelement SAMP1 70% der Beobachtungen und wird für den Trainingsdatensatz verwendet.
+  # Das Listenelement SAMP2 enthält 30% der Beobachtungen und enthält die Daten für den Validierungs- und Testdatensatz.
+  # Dieser Datensatz wird nun stratifiziert 50 / 50 aufgeteilt.
+  
+  set.seed(1234) 
+  list_split <- splitstackshape::stratified(list_split$SAMP2, "TARGET", 0.5, bothSets = TRUE) 
+  val_data <- list_split$SAMP1 %>% 
+    data.frame() 
+  test_data <- list_split$SAMP2 %>% 
+    data.frame() 
+   
+  # Zusammenstellung der Rückgabe-Liste 
+  # Zusätzlich wird überprüft, ob die eindeutige ("unique") Anzahl der "nr"-Einträge in den drei Dateien gleich
+  # der Zeilenanzahl der Ursprungsdatei ist. Damit wird sichergestellt, dass jede Zeilenanzahl genau ein Mal in den drei
+  # Datensätzen vorkommt. 
+
+  rueckgabe$split_test <- (length(unique(c(train_data$nr, val_data$nr, test_data$nr))) == nrow(data_num)) 
+  rueckgabe$train_data <- train_data %>%  
+    dplyr::select(-nr) 
+  rueckgabe$val_data <- val_data %>%  
+    dplyr::select(-nr) 
+  rueckgabe$test_data <- test_data %>%  
+    dplyr::select(-nr) 
+   
+  return(rueckgabe) 
+} 
+```
+
+**Aufteilung Datensatz "diabetic_data_ter"**
+
+```{r}
+tmp <- split_data(diabetic_data_ter) 
+tmp$split_test 
+```
+
+Der Test zeigt, dass alle Zeilen des Ursprungdatensatzes genau ein Mal in den drei gesplitteten Dateien vorkommt.
+
+Zuweisung der einzelnen Dateien:
+
+```{r}
+train_data_ter <- tmp$train_data 
+val_data_ter <- tmp$val_data 
+test_data_ter <- tmp$test_data 
+```
+
+Nach dem Split wird in etwa die folgende Aufteilung erwartet (die erste Spalte ist - bis auf Rundungsdifferenzen - die erwartete Anzahl im Trainingsdatensatz, Spalte 2 bzw. Spalte 3 die Anzahl im Validierungs- bzw. Testdatensatz). 
+
+```{r}
+tmp <- round(table(diabetic_data_ter$TARGET) %*% t(c(0.7,0.15,0.15)),0) 
+colnames(tmp) <- c("Training", "Validierung", "Test")
+tmp
+```
+
+Diese erwartete Anzahl wird bis auf eine Abweichung von 1 (aufgrund der Rundungen in der obigen Auswertung) in den drei
+Datensätzen beobachtet:
+
+Die Zeilenanzahl im Trainingsdatensatz ist `r format(nrow(train_data_ter), big.mark = ".", decimal.mark = ",", scientific = FALSE)`, die Aufteilung des Merkmals *TARGET* ist:
+
+```{r}
+table(train_data_ter$TARGET) 
+```
+
+Die Zeilenanzahl im Validierungsdatensatz ist `r format(nrow(val_data_ter), big.mark = ".", decimal.mark = ",", scientific = FALSE)`, die Aufteilung des Merkmals *TARGET* ist:
+
+```{r}
+table(val_data_ter$TARGET) 
+```
+
+Die Zeilenanzahl im Testdatensatz ist `r format(nrow(test_data_ter), big.mark = ".", decimal.mark = ",", scientific = FALSE)`, die Aufteilung des Merkmals *TARGET* ist:
+
+```{r}
+table(test_data_ter$TARGET) 
+```
+
+
+**Aufteilung Datensatz "diabetic_data_bin"**
+
+```{r}
+tmp <- split_data(diabetic_data_bin)
+tmp$split_test
+```
+
+Der Test zeigt, dass alle Zeilen des Ursprungdatensatzes genau ein Mal in den drei gesplitteten Dateien vorkommt.
+
+Zuweisung der einzelnen Dateien:
+
+```{r}
+train_data_bin <- tmp$train_data
+val_data_bin <- tmp$val_data
+test_data_bin <- tmp$test_data
+```
+
+Nach dem Split wird in etwa die folgende Aufteilung erwartet (die erste Spalte ist - bis auf Rundungsdifferenzen - die erwartete Anzahl im Trainingsdatensatz, Spalte 2 bzw. Spalte 3 die Anzahl im Valdierungs- bzw. Testdatensatz). 
+
+```{r}
+tmp <- round(table(diabetic_data_bin$TARGET) %*% t(c(0.7,0.15,0.15)),0)
+colnames(tmp) <- c("Training", "Validierung", "Test")
+tmp
+```
+
+Diese erwartete Anzahl wird bis auf eine Abweichung von 1 (aufgrund der Rundungen in der obigen Auswertung) in den drei
+Datensätzen beobachtet:
+
+Die Zeilenanzahl im Trainingsdatensatz ist `r format(nrow(train_data_bin), big.mark = ".", decimal.mark = ",", scientific = FALSE)`, die Aufteilung des Merkmals *TARGET* ist:
+
+```{r}
+table(train_data_bin$TARGET) 
+```
+
+Die Zeilenanzahl im Validierungsdatensatz ist `r format(nrow(val_data_bin), big.mark = ".", decimal.mark = ",", scientific = FALSE)`, die Aufteilung des Merkmals *TARGET* ist:
+
+```{r}
+table(val_data_bin$TARGET) 
+```
+
+Die Zeilenanzahl im Testdatensatz ist `r format(nrow(test_data_bin), big.mark = ".", decimal.mark = ",", scientific = FALSE)`, die Aufteilung des Merkmals *TARGET* ist:
+
+```{r}
+table(test_data_bin$TARGET) 
+```
+
+
+## b) 8.3 XGBoost parameters and fitting
+
+Die nachfolgende Funktion dient zur Umformung alle kategoriellen Merkmale (Factor-Variablen) in Integer-Variablen.
+
+```{r}
+fac_to_num <- function(data, logistic = TRUE) {
+  # Parameter:
+  #    logistic = TRUE: Für bin-Daten - die Target-Variable wird in ein Interger umgewandelt und auf 0 / 1 gesetzt
+  #    logistic = FALSE: Für ter-Daten - die Target-Variable bleibt eine Faktor-Variable
+  
+  data_num <- 
+    data.frame(lapply(data, function(x) {
+      if (is.factor(x)) {
+        as.integer(x)
+      } else {
+        x
+      }
+    }))
+  if (logistic == TRUE) {
+    data_num$TARGET <- data_num$TARGET - 1
+  } else {
+    data_num$TARGET <- data$TARGET
+  }
+  
+  return(data_num)
+}
+```
+
+Der XGBoost-Algorithmus benötigt eine spezielle Struktur der Eingangsdaten in *xgb.DMatrix*-Format. Die Funktion zur Erzeugung des Formats erlaubt als Eingangsgrößen nur numerische Matrizen. Deshalb werden in den drei benötigten Datensätze alle kategoriellen Merkmale in numerische Werte umgewandelt. 
+
+```{r}
+train_data_bin_num <- fac_to_num(train_data_bin, logistic = TRUE)
+val_data_bin_num <- fac_to_num(val_data_bin, logistic = TRUE)
+test_data_bin_num <- fac_to_num(test_data_bin, logistic = TRUE)
+```
+
+Erzeugung der drei Datensätze in *xgb.DMatrix*-Format:
+
+```{r}
+dtrain_bin <- xgboost::xgb.DMatrix(as.matrix(train_data_bin_num %>% dplyr::select(-TARGET), enable_categorical = TRUE),label = train_data_bin_num$TARGET)
+dvalid_bin <- xgboost::xgb.DMatrix(as.matrix(val_data_bin_num %>% dplyr::select(-TARGET), enable_categorical = TRUE),label = val_data_bin_num$TARGET)
+dtest_bin <- xgboost::xgb.DMatrix(as.matrix(test_data_bin_num %>% dplyr::select(-TARGET), enable_categorical = TRUE))
+```
+
+**Bemerkung:**: Der XGBoost-Algorithmus benötigte in früherer Form eine Umformung kategorieller Variablen mit *One-Hot-Encoding*. Neuere Version können mit *encodeden Variablen* bzw. sogenannten *Label-Encoding* (Umwandlung der Faktoren in 1, 2, ...) umgehen. Mit dem Parameter *enable_categorical = TRUE* wird angezeigt, dass ursprünglich kategorielle Variablen im Datensatz vorhanden waren.
+
+Ein One-Hot-Encoding aller kategorieller Variablen im Trainings-Datensatz könnte beispielsweise mit folgender Funktion durchgeführt werden (es werden nur die Formeln angeführt, sie sind allerdings auskommentiert)
+
+```{r}
+# Ermittlung aller Merkmale mit mehr als einer Ausprägung
+# keep_col_xgb <- merkmale_info %>%
+#   dplyr::filter(Anzahl > 1) %>%
+#   dplyr::pull(Merkmal)
+# train_data_bin_ohe <- model.matrix(~ . - 1, data = train_data_bin[,keep_col_xgb])
+```
+
+Die nachfolgende Funktion wird für die Parameteroptimierung (Anzahl der verwendeten Bäume) benötigt. Wie gefordert, wird das Gütemaß *AUC* (area under the ROC curve) verwendet.
+
+```{r}
+xgb_AUC <- function(preds, dtrain){
+  actual <- xgboost::getinfo(dtrain, "label")
+  score <- MLmetrics::AUC(preds, actual)
+  return(list(metric = "AUC", value = score))
+}
+```
+
+```{r}
+xgb_params <- list(
+  colsample_bytree = 1,  
+  subsample = 1, 
+  booster = "gbtree",
+  max_depth = 5, 
+  eta = 0.3, 
+  eval_metric = xgb_AUC,
+  objective = "reg:logistic",
+  nthread = 1
+)
+```
+
+Die wichtigsten Parameter für das Training eines XGBoost-Modells sind:
+
+-   **colsample_bytree**: Gibt den Anteil der Spalten / Features an, die zufällig pro Baum verwendet werden. Der Paramter hat einen Wertebereich von [0,1], wobei der Standardwert = 1.0 ist. Die Verwendung des Parameters reduziert das Overfitting und erhöht die Robustheit des Modells.
+-   **subsample**: Gibt den Anteil der Trainingsdaten an, die zufällig pro Baum verwendet werden. Der Paramter hat einen Wertebereich von [0,1], wobei der Standardwert = 1.0 ist. Die Verwendung des Parameters reduziert das Overfitting und erhöht die Diversität der Bäume.
+-   **max_depth**: Ist ein ganzzahliger Wert >0 und gibt die maximale Tiefe eines Entscheidungsbaumes vor. Mit diesem Parameter kann die Komplexität des Modells kontrolliert werden. Ein hoher Wert führt zu einem komplexeren Modell, wodurch das Risiko für Overfitting steigt.
+-   **eta** (auch **Lernrate** genannt): Steuert, mit welchem Gewicht die einzelnen Bäume im gesamten Modell (Assemble von Bäumen) eingehen. Der Standardwert ist 0.3, wobei ein kleiner Wert zu einem langsameren aber häufig "genaueren" Lernen führt. Im Falle eines kleinen eta sollte die Anzahl der Bäume (Parameter **nrounds**) erhöht werden.
+
+**Bemerkung**: Wie in den vorigen Abschnitten gesehen, hat die Zielvariable ein deutliches Übergewicht in der Ausprägung 0. Dieses Übergewicht könnte mit dem Parameter *scale_pos_weight* in der Modellierung berücksicht werden, indem die Beobachtungen mit Ausprägung 1 höher gewichtet werden. Diese Möglichkeit haben auch die meisten der in den folgenden Abschnitten verwendeten Methoden, wobei hier und auch später nicht von der Möglichkeit gebraucht gemacht wird (das wäre ein Schritt im Zuge einer Modelloptimierung).
+
+Für die nachfolgende Modellierung wird die Lernrate *eta* wie in der Ausarbeitung SWoF auf 0.3 belassen. Dies führt zu einem schnelleren Training bzw. zu einem Modell mit einer gerinen Anzahl von Entscheidungsbäumen. Damit benötigen nachfolgende Analysen, wie beispielsweise die Ermittlung von Interaktionen zwischen den Merkmalen, weniger Zeit. In einer "realen" Anwendung sollte allerdings eine Optimierung der Hyperparameter erfolgen.
+
+Die beiden Parameter *colsample_bytree* und *subsample* werden jeweils auf 1 gesetzt (im Gegensatz zur Ausarbeitung SWoF, in der beide Parameter 0.7 sind). Der Grund ist die Ermittlung der in Aufgabe *R4: b) Logistische Regression mit Interaktionen* benötigte Interaktionen mit dem Paket *EIX* (siehe entsprechenden Abschnitt).
+
+```{r}
+watchlist <- list(train = dtrain_bin, valid = dvalid_bin)
+
+set.seed(1234)
+xgb_cv <- xgboost::xgb.cv(xgb_params, 
+                          dtrain_bin, 
+                          early_stopping_rounds = 5, 
+                          nfold = 5, 
+                          print_every_n = 5,
+                          nrounds = 50, 
+                          maximize = TRUE)
+```
+
+Im Gegensatz zum originalen Code wird für das Training des verwendeten Modells kein **early_stopping_rounds** verwendet, sondern die über cv ermittelte optimale Rundenanzahl (=Baumtiefe) von `r xgb_cv$best_iteration` verwendet.
+
+
+```{r}
+best_nrounds <- xgb_cv$best_iteration
+
+set.seed(1234)
+xgb_model <- xgboost::xgb.train(params = xgb_params,
+                                data = dtrain_bin,
+                                print_every_n = 5,
+                                watchlist = watchlist,
+                                nrounds = best_nrounds,
+                                maximize = TRUE)
+```
+
+Berechnung der Wahrscheinlichkeit für den Wert 1 in der Zielvariable für alle Beobachtungen im Test-Datensatz:
+
+```{r}
+probs_xgb <- predict(xgb_model, dtest_bin)
+```
+
+Der AUC-Wert der Testdaten ist `r MLmetrics::AUC(probs_xgb, test_data_bin$TARGET)`.
+
+```{r}
+MLmetrics::AUC(probs_xgb, test_data_bin$TARGET)
+```
+
+
+## c) 8.4 Feature Importance
+
+Die Feature Importance wird mit Hilfe der Funktion *xgb.importance* aus dem XGBoost-Paket berechnet.
+
+```{r}
+imp_matrix <- tibble::as_tibble(
+  xgboost::xgb.importance(feature_names = colnames(train_data_bin %>% dplyr::select(-TARGET)), model = xgb_model))  %>%
+  head(20)
+```
+
+Die folgende Grafik zeigt die 20 Merkmale mit den höchsten Importance-Werte (zur übersichtlicheren Darstellung wurde die Auswertung auf die ersten 20 Merkmale beschränkt.)
+
+```{r}
+imp_matrix %>%
+  ggplot(aes(reorder(Feature, Gain, FUN = max), Gain, fill = Feature)) +
+  geom_col() +
+  coord_flip() +
+  theme(legend.position = "none",
+         panel.background = element_rect(fill = "white", color = NA),
+         plot.background = element_rect(fill = "white", color = NA)) +
+  labs(title = "Feature Importance der Merkmale für die binären Zielvariable TARGET",
+       x = "Features", y = "Importance")
+```
+
+Die höchste Importance zeigen die Variablen 
+
+-   *discharge_disposition_id*: Vereinbarung bzw. Entscheidung, wohin der Patient nach dem Aufenthalt entlassen wird, z.B. nach Hause, Rehabilitationsklinik, Pflegeheim, ...
+-   *number_inpatient*: Anzahl der stationären Besuche des Patienten im Jahr vor Einweisung
+-   *diag_1*, *diag_2* und *diag_3*: Diagnosen
+-   *num_lab_procedures*: Anzahl der durchgeführten Test (während der Begegnungen)
+-   *number_diagnoses*: Anzahl der gestellten Diagnosen
+-   *num_medications*: Anzahl der Medikamente
+-   *age*: Alter
+
+Die Auswertung zeigt, welche Merkmale in einen Modell jedenfalls berücksichtigt werden sollen, um eine hohe Progrosegüte der Zielvariable zu gewährleisten. Diese Merkmale sollten (nach einer genaueren Analyse der Importance der einzelnen Ausprägungen) ebenfalls in Entscheidungen über die Behandlung des Patienten berücksichtigt werden, um die Wahrscheinlichkeit einer möglichen Wiedereinweisung zu verringern. 
+
+
+# R4: Logistische Regressionen ohne und mit Interaktionen
+
+## a) Logistische Regressionen ohne Interaktionen
+
+Zunächst werden alle Merkmale / Prädiktoren ermittelt, die mindestens zwei verschiedene Ausprägungen haben. Für die Ermittlung wird die vorhin berechnete Tabelle *merkmale_info* verwendet. Danach werden die drei Diagnosenspalten *diag_1*, *diag_2* und *diag_3* - die nicht als Prädiktoren berücksichtigt werden sollen - ausgeschlossen (die Zielvariable wird in diesem Schritt nicht ausgeschlossen, da sie noch im Datensatz benötigt wird).
+
+```{r}
+keep_col <- merkmale_info %>%
+  dplyr::filter(Anzahl > 1) %>%
+  dplyr::pull(Merkmal)
+keep_col <- keep_col[!(keep_col %in% c("diag_1", "diag_2", "diag_3"))]
+```
+
+Generierung des Trainings- und Testdatensatzes:
+
+```{r}
+train_data_glm <- train_data_bin[,keep_col]
+test_data_glm <- test_data_bin[,keep_col]
+
+```
+
+Traing des Modells für die logistische Regression mit der Funktion *glm* und dem Parameter *family = binomial*
+
+```{r}
+glm_model <- glm(TARGET ~ ., data = train_data_glm, family = binomial)
+```
+
+Eine Übersicht der wichtigsten Modellgrößen und Prädiktoren wird mit der Funktion *summary()* erstellt. Dabei enthält der Abschnitt *Coefficients* für jedes Merkmal 
+
+-   den Schätzwert (1. Spalte)
+-   die Standardabweichung (2. Spalte)
+-   den z-Wert = Wert der Teststatistik mit der H0-Hypothese *Prädiktor = 0* (3. Spalte)
+-   den p-Wert des Tests (4. Spalte)
+
+```{r}
+(sum_glm_model <- summary(glm_model))
+```
+
+In der logistischen Regression wird für jede Ausprägung eines kategoriellen Merkmals ein eigener Parameter geschätzt (bzw. ist der Parameterwert einer der Ausprägungen im *Intercept* enthalten, deshalb werden bei insgesamt *n* Ausprägungen für ein Merkmal nur die Parameter von *n-1* Ausprägungen angezeigt). Die Importance der einzelnen Ausprägungen kann mit der Funktion *varImp* aus dem Paket *caret* ermittelt werden. Die folgende Auswertung zeigt die 20 wichtigen Ausprägungen der Größe nach sortiert. Der Wert *Overall* entspricht dem Absolutwert des *z-Wert* (3. Spalte) in der *summary()*.
+
+```{r}
+caret::varImp(glm_model) %>%
+  dplyr::arrange(desc(Overall)) %>%
+  head(20)
+```
+
+Aus der *summary()* können die statistisch signifikanten Merkmale / Ausprägungen für ein vorgegebenes Signifikanzniveau ermittelt werden. Dies sind alle Merkmale / Ausprägungen, die einen *p-Wert* (4. Spalte) kleiner als das vorgegebene Signifikanzniveau haben. In der nachfolgenden Auswertung wird ein Signifikanzniveau von 5% (0.05) verwendet.
+
+```{r}
+coefs <- sum_glm_model$coefficients
+signifikant_glm <- coefs[coefs[, 4] < 0.05, ]
+```
+
+Insgesamt sind `r nrow(signifikant_glm)` Ausprägungen statistisch signifikant, wobei der Intercept auch mitgezählt wurde. Die signifikanten Ausprägungen sind:
+
+```{r}
+signif_vars <- rownames(signifikant_glm)
+signif_vars <- signif_vars[signif_vars != "(Intercept)"]
+coefs[rownames(coefs) %in% signif_vars,1:2] %>%
+  data.frame() %>%
+  dplyr::arrange(Estimate)
+```
+
+**Erkenntnisse**:
+
+-   Die logistische Regression liefert mit *number_inpatient*, *discharge_disposition_id* und *number_diagnoses* ähnliche Aussagen über die Wichtigkeit der Merkmale, wie das XGBoost-Modell im vorigen Abschnitt.
+-   Die höchste Signifikanz zeigt die Anzahl *number_inpatient*.
+-   Insgesamt sind `r nrow(signifikant_glm) - 1` Ausprägungen statistisch signifikant (ohne Intercept). Die Auflistung dieser Ausprägungen oben zeigt, dass nicht alle Ausprägungen eines Merkmals für die Erklärung der Zielvariable signifikant sind.
+-   Der Schätzwert *Estimate* in der obenstehenden Tabelle zeigt an, ob die Ausprägung / Prädiktor die Wahrscheinlichkeit der Zielvariable (= Wahrscheinlichkeit für eine Wiedereinweisung) erhöht (positiver Wert) oder verringert (negativer Wert). So hat beispielsweise die Ausprägung *23* von *discharge_disposition_id* einen stark negativen Einfluss auf die Wahrscheinlichkeit einer Wiedereinweisung, die Ausprägung *15* einen stark positiven Einfluss.
+
+
+**Berechnung des AUC auf den Testdaten**
+
+Berechnung der Wahrscheinlichkeit für den Wert 1 in der Zielvariable für alle Beobachtungen im Test-Datensatz:
+
+```{r}
+probs_glm <- predict(glm_model, newdata = test_data_glm, type = "response")
+```
+
+Der AUC-Wert der Testdaten ist `r MLmetrics::AUC(probs_glm, test_data_glm$TARGET)`.
+
+```{r}
+MLmetrics::AUC(probs_glm, test_data_glm$TARGET)
+```
+
+Die Wahl des Schwellwertes ist vor allem bei unbalancierte binäre Kenngrößen von entscheidender Bedeutung, da er direkten und starken Einfluss auf die Sensitivität (True Positive Rate) und Spezifität (True Negative Rate) hat. 
+Bei unbalancierten Daten neigen Modelle häufig dazu, die *negative Klasse* (= die häufer vorkommende Klasse, im Falle der Zielvariable also 0) zu bevorzugen, was zu einer hohen Spezifität aber niedriger Sensitivität führt. Die *positive Klasse* (= die seltenere Klasse, im Falle der Zielvariable also 1) wird hingegen vernachlässigt. Das passiert vor allem, wenn ein Schwellwert hoch (z.B. 0.5) gewählt wird, da das Modell nur dann positiv klassifiziert, wenn die Wahrscheinlichkeit für den Wert 1 über 0.5 liegt - das ist bei einem unbalancierten Datensatz allerdings aufgrund der Bevorzugung der negativen Klasse, häufig nicht der Fall.
+
+**Bemerkung:**
+
+-   *Sensitivität*: misst die Fähigkeit des Modells, die positiven Fälle korrekt zu identifizieren (wichtig in medizinischen Tests, bei denen Krankheiten - oder wie im vorliegenden Fall eine Wiedereinweisung - selten vorkommen).
+-   *Spezifität*: misst, wie gut das Modell negative Fälle korrekt identifiziert.
+
+**Berechnung der Konfusionsmatrix mit Schwellwert 0.5**
+
+```{r}
+predicted_class_glm <- ifelse(probs_glm >= 0.5, 1, 0)
+conf_mat <- caret::confusionMatrix(factor(predicted_class_glm), factor(test_data_glm$TARGET), positive = "1")
+conf_mat$table
+```
+
+Die positive Klasse (die seltenere Klasse), kann in der Funktion *confusionMatrix* mit dem Parameter *positive* vorgegeben werden.
+
+Grafische Darstellung der Konfusionsmatrix:
+
+```{r}
+cm_table <- as.data.frame(conf_mat$table)
+
+ggplot(data = cm_table, aes(x = Reference, y = Prediction)) +
+  geom_tile(aes(fill = Freq), color = "white") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.background = element_rect(fill = "white", color = NA)) +
+  labs(title = "Konfusionsmatrix (Binäre Klassifikation) mit Schwelle 0.5",
+       x = "Tatsächlich", y = "Vorhergesagt")
+```
+
+Mit dem hohen Schwellwert von 0.5 werden fast alle Testfällt mit 0 vorhergesagt. Die Sensitivität beträge `r round(conf_mat$byClass["Sensitivity"],5)`, die Spezifität `r round(conf_mat$byClass["Specificity"],5)`.
+
+
+**Berechnung der Konfusionsmatrix mit Schwellwert 0.2**
+
+```{r}
+predicted_class_glm <- ifelse(probs_glm >= 0.2, 1, 0)
+conf_mat_glm <- caret::confusionMatrix(factor(predicted_class_glm), factor(test_data_glm$TARGET), positive = "1")
+conf_mat_glm$table
+```
+
+Grafische Darstellung der Konfusionsmatrix:
+
+```{r}
+cm_table <- as.data.frame(conf_mat_glm$table)
+
+ggplot(data = cm_table, aes(x = Reference, y = Prediction)) +
+  geom_tile(aes(fill = Freq), color = "white") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.background = element_rect(fill = "white", color = NA)) +
+  labs(title = "Konfusionsmatrix (Binäre Klassifikation) mit Schwelle 0.2",
+       x = "Tatsächlich", y = "Vorhergesagt")
+```
+
+Die Anzahl der korrekten Prognosen 1 ist deutlich erhöht. Die Sensitivität ist auf `r round(conf_mat_glm$byClass["Sensitivity"],5)` gestiegen, die Spezifität beträgt `r round(conf_mat_glm$byClass["Specificity"],5)`.
+
+Im folgenden ist eine Analyse von Sensitivität (Sensitivity) und Spezifität (Specificity) in Abhängigkeit vom Schwellwert dargestellt.
+
+```{r}
+show_sensi <- function(probs) {
+  lapply(seq(0.05,.95,0.05), function(sw) {
+    predicted_class <- ifelse(probs >= sw, 1, 0)
+    predicted_class_fac <- 
+      factor(predicted_class, levels = 0:1, labels = levels(test_data_glm$TARGET))
+    conf_mat <- caret::confusionMatrix(predicted_class_fac, factor(test_data_glm$TARGET), positive = "1")
+    
+    list(
+      Schwelle = sw,
+      Sensitivity = conf_mat$byClass["Sensitivity"],
+      Specificity = conf_mat$byClass["Specificity"],
+      Accuracy = conf_mat$overall["Accuracy"]
+    )
+  }) %>% 
+    dplyr::bind_rows() %>%
+    data.frame() 
+}
+show_sensi(probs_glm)
+```
+
+
+## b) Logistische Regression mit Interaktionen
+
+Zunächst werden die Wechselwirkungen zwischen den Prädiktoren des XGBoost-Modells mit Hilfe der Funktion *hstats* des gleichnamigen Pakets bestimmt bzw. analysiert.
+
+In der Funktion *hstats* werden Interaktionen zwischen Variablen basierend auf der sogenannten *zweidimensionalen zentrierten 
+Partial Dependence Function (PDP)* geschätzt. Die *PDP* zeigt den durchschnittlichen Effekt einer oder mehrerer Variablen auf die Modellvorhersage, indem man den Wert für die Variablen fixiert und über alle anderen Variablen mittelt.
+
+Die *zweidimensionale zentrierte PDP* zeigt die gemeinsame Wirkung zweier Variablen, indem der durchschnittliche Effekt jeder einzelnen Variablen entfernt wird (d.h. die Variablen werden zentriert). Damit zeigt der Wert nur die Interaktion der Variablen und nicht den gesamten Haupteffekt.
+
+Standardmäßig werden Interaktionen nur zwischen fünf Merkmalen berechnet. Die Auswahl der dabei betrachteten Merkmale erfolgt Anhand der allgemeinen Interaktionsstärke des Merkmals, bestimmt durch die sogenannte [Friedman's H-Statistik](https://christophm.github.io/interpretable-ml-book/interaction.html). Eine größere Anzahl von Interaktionen kann durch den Parameter *pairwise_m* eingestellt werden, der angibt, für wie viele Merkmale der paarweise Interaktionswert berechnet werden soll. Für die benötigte Analyse wird die Interaktion zwischen allen Merkmalen berechnet.
+
+Im Folgenden werden nur Interaktionen zwischen Merkmalen untersucht, die zumindest zwei Ausprägungen haben bzw. werden auch die drei Merkmale *diag_1*, *diag_2* und *diag_3* ausgeschlossen. Die Liste dieser Merkmale ist in der Variable *keep_col* gespeichert. Aus dieser Liste wird auch noch die Variable *TARGET* herausgenommen.
+
+```{r}
+keep_col_h2 <- keep_col[!(keep_col == "TARGET")]
+```
+
+**Bemerkung**: Die Interaktionen werden nicht auf Basis aller Beobachtungen ermittelt, sondern auf einer Stichprobe von 500 (deshalb muss zur Reproduzierbarkeit der Zufallsgenerator gesetzt werden). Die Anzahl der verwendeten Beobachtungen kann durch den Parameter *n_max* festgelegt werden. Eine Erhöhung des Parameters führt zu einer deutlichen Erhöhung der Laufzeit.
+
+Die Liste der zu untersuchenden Merkmale kann durch den Parameter *v* vorgebenen werden. In diesem Fall werden die Merkmale nicht wie oben beschrieben vom der Funktion selbst ge
+
+```{r, echo=TRUE, results='hide'}
+set.seed(1234)
+hs <- hstats::hstats(xgb_model, as.matrix(train_data_bin_num %>% dplyr::select(-TARGET)), v = keep_col_h2,
+                     pairwise_m = length(keep_col_h2))
+```
+
+Die Interaktionen der einzelnen Merkmale werden über die Funktion *h2_pairwise* ausgelesen.
+
+```{r}
+h2_pw <- hstats::h2_pairwise(hs) 
+plot(h2_pw)
+```
+
+Die folgende Tabelle zeigt die 10 höchsten Interaktionen zwischen den Merkmalen.
+
+```{r}
+interactions_h2 <- data.frame(h2_pw$M) %>%
+  tibble::rownames_to_column(var = "inter")
+head(interactions_h2, 10)
+```
+
+Eine weitere Möglichkeit, Interaktionen zwischen zwei Merkmalen zu untersuchen, bietet das Paket *EIX* ("Explain Interactions in XGBoost"). In der Funktion *interactions* aus diesem Paket werden alle Splits ("Eltern- / Kindknoten"-Beziehungen der Merkmale) untersucht und der sogenannte *Gain* eines Splits ermittelt. Der Gain berechnet sich aus der Summe der *Similarity Scores* der beiden Knoten nach dem Split, minus dem *Similarity Score* des Ursprungsknoten, wobei der Similarity Score die quadrierte Summe der Residuen in einem Knoten dividiert durch die Anzahl der Beobachtungen in diesem Knoten ist. Eine gute und übersichtliche Darstellung findet sich in [XGBoost — How does this work](https://medium.com/@prathameshsonawane/xgboost-how-does-this-work-e1cae7c5b6cb).
+
+**Bemerkungen**: 
+
+-   Der Vorteil der Verwendung von *EIX* anstelle von *hstats* ist, dass das Ergebnis von *EIX* nicht von der gewählten Stichprobe abhängt. So ergibt sich beispielsweise in *hstats* bei einer größeren Stichprobe mit *n_max = 5000* ein geändertes Ergebnis. In *EIX* hingegen wird die gesamte Struktur des Modells / Entscheidungsbaum berücksichtig.
+-   Die Funktion *interactions* rechnet leider bei größeren Bäumen sehr lange. Aufgrund der gewählten hohen Lernrate von 0.3 ist der oben entwickelte Entscheidungsbaum allerdings "klein", wodurch die Rechenzeit von *interactions* gering ist.
+
+```{r}
+Inter <- EIX::interactions(xgb_model, dtrain_bin, option = "pairs")
+```
+
+Die durch das Paket *EIX* ermittelten Interaktionen sind nicht symmetrisch, d.h. die Interaktion von Merkmal A zu Merkmal B kann einen anderen Wert als die ermittelte Interaktion von Merkmal B zu Merkmal A haben. Deshalb werden die beiden ermittelten Werte "Merkmal A zu Merkmal B" und "Merkmal B zu Merkmal A" summiert.
+
+```{r}
+interactions_EIX <- data.frame(Inter) %>%
+  dplyr::filter(!(Parent %in% c("diag_1", "diag_2", "diag_3")),
+                !(Child %in% c("diag_1", "diag_2", "diag_3"))) %>%
+  dplyr::filter(Parent != Child) %>%
+  dplyr::mutate(inter = ifelse(Parent < Child,
+                               stringr::str_c(Parent, Child, sep = ":"),
+                               stringr::str_c(Child, Parent, sep = ":"))) %>%
+  dplyr::group_by(inter) %>%
+  dplyr::reframe(sumGain = sum(sumGain)) %>%
+  dplyr::arrange(desc(sumGain)) %>%
+  data.frame()
+```
+
+Im Folgenden werden die höchsten von *hstats* und *EIX* ermittelten Interaktionen gegenübergestellt.
+
+```{r}
+head(interactions_h2, 10)
+head(interactions_EIX, 10)
+```
+
+Für die nachfolgenden Auswertung werden die drei höchsten Korrelationen aus *EIX* verwendet:
+
+```{r, warning=TRUE}
+formula_string <- stringr::str_c("TARGET ~ . + ", stringr::str_c(interactions_EIX$inter[1:3], collapse  = " + "), collapse  = "")
+(formula <- as.formula(formula_string))
+glm_model_inter <- glm(formula, data = train_data_glm, family = binomial)
+```
+
+**Bemerkung**: Beim Fit wird die Warnmeldung *glm.fit: Angepasste Wahrscheinlichkeiten mit numerischem Wert 0 oder 1 aufgetreten* angezeigt. Dass bedeutet, dass für zumindest eine Beobachtung die exakten Wahrscheinlichkeiten 0 oder 1 berechnet wurden. Diese Warnmeldung kann durch einen regularisierten Ansatz (z.B. Lasso- oder Ridge-Regression), mit dem die Schätzungen stabilisiert werden, vermieden werden.
+
+```{r}
+(sum_glm_model_inter <- summary(glm_model_inter))
+```
+
+Die folgende Auswertung zeigt die 20 wichtistgen Ausprägungen der Größe nach sortiert. Der Wert *Overall* entspricht dem Absolutwert des *z-Wert* (3. Spalte) in der *summary()*.
+
+```{r}
+caret::varImp(glm_model_inter) %>%
+  dplyr::arrange(desc(Overall)) %>%
+  head(20)
+```
+
+In der oben angeführten Liste sind zwei Interaktionen enthalten, die in das Modell mit aufgenommen wurden.
+
+Aus der *summary()* werden die statistisch signifikanten Ausprägungen mit einem Signifikanzniveau von 5% (0.05) ermittelt:
+
+```{r}
+coefs <- sum_glm_model_inter$coefficients
+signifikant_inter <- coefs[coefs[, 4] < 0.05, ]
+```
+
+Insgesamt sind `r nrow(signifikant_inter)` Ausprägungen statistisch signifikant, wobei der Intercept auch mitgezählt wurde. Die signifikanten Ausprägungen sind:
+
+```{r}
+signif_vars <- rownames(signifikant_inter)
+signif_vars <- signif_vars[signif_vars != "(Intercept)"]
+coefs[rownames(coefs) %in% signif_vars,1:2] %>%
+  data.frame() %>%
+  dplyr::arrange(Estimate)
+```
+
+**Berechnung des AUC auf den Testdaten**
+
+Berechnung der Wahrscheinlichkeit für den Wert 1 in der Zielvariable für alle Beobachtungen im Test-Datensatz:
+
+```{r}
+probs_inter <- predict(glm_model_inter, newdata = test_data_glm, type = "response")
+```
+
+Der AUC-Wert der Testdaten ist `r MLmetrics::AUC(probs_inter, test_data_glm$TARGET)`.
+
+```{r}
+MLmetrics::AUC(probs_inter, test_data_glm$TARGET)
+```
+
+**Berechnung der Konfusionsmatrix mit Schwellwert 0.2**
+
+```{r}
+predicted_class_inter <- ifelse(probs_inter >= 0.2, 1, 0)
+conf_mat_inter <- caret::confusionMatrix(factor(predicted_class_inter), factor(test_data_glm$TARGET), positive = "1")
+conf_mat_inter$table
+```
+
+Grafische Darstellung der Konfusionsmatrix:
+
+```{r}
+cm_table <- as.data.frame(conf_mat_inter$table)
+
+ggplot(data = cm_table, aes(x = Reference, y = Prediction)) +
+  geom_tile(aes(fill = Freq), color = "white") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.background = element_rect(fill = "white", color = NA)) +
+  labs(title = "Konfusionsmatrix (Binäre Klassifikation) mit Schwelle 0.2",
+       x = "Tatsächlich", y = "Vorhergesagt")
+```
+
+
+## c) Modellvergleich und Diskussion
+
+Die Hinzunahme der Interaktionen hat die Prognosegüte nur geringfügig verbessert. Der AUC steigt von `r MLmetrics::AUC(probs_glm, test_data_glm$TARGET)` auf `r MLmetrics::AUC(probs_inter, test_data_glm$TARGET)`
+
+Ebenso gibt es nur geringfügige Änderungen in der Konfusionsmatrix, wobei die Anzahl der korrekten Prognosen leicht gestiegen ist.
+
+Konfusionsmatrix ohne Interaktion:
+
+```{r}
+conf_mat_glm$table
+```
+
+Konfusionsmatrix mit Interaktion:
+
+```{r}
+conf_mat_inter$table
+```
+
+Die Sensitivität ist von ursprünglich `r round(conf_mat_glm$byClass["Sensitivity"],5)` ohne Interaktion auf `r round(conf_mat_inter$byClass["Sensitivity"],5)` mit Interaktion gestiegen, die Spezifität von `r round(conf_mat_glm$byClass["Specificity"],5)` auf `r round(conf_mat_inter$byClass["Specificity"],5)` gesunken.
+
+**Ansätze zur weiteren Erhöhung der Modellgüte**
+
+-   Hinzunahme von mehr Interaktionen (nicht nur drei)
+-   Nutzung von Interaktionen mit Polynomialen oder Splines
+
+
+
+# R5: Regularisierte Lineare Modelle und GAMs
+
+Für die folgende Modellierung wird die Funktion *glmnet* aus dem gleichnamigen Paket verwendet. In der Funktion ist der Parameter *alpha* per default = 1 und entspricht einer *Lasso* bzw. *L1-Anpassung*. Für alpha = 0 wird eine *Ridge* bzw. *L2-Anpassung* berechnet.
+
+
+## a) L1-Regularisierung (LASSO)
+
+Aufbereitung der Datensätze für die L1-Regularisierung:
+
+```{r}
+x <- model.matrix(~ ., data = train_data_glm %>% dplyr::select(-TARGET))
+y <- as.numeric(train_data_glm$TARGET) - 1
+```
+
+Die Bestimmung des "optimalen" Lambda bzw. optimalen Modells erfolgt über eine Kreuzvalidierung mit Hilfe der Funktion *cv.glmnet*.
+
+Die roten Punkte in der folgenden Grafik zeigen die Cross-Validation-Werte für den entsprechenden (log)-Lambda-Wert.
+
+```{r}
+cvfit_lasso <- glmnet::cv.glmnet(x, y, alpha = 1, family = binomial)
+plot(cvfit_lasso)
+```
+
+**Bemerkung:** Wie im Kapitel zur Datenanalyse bereits festgestellt wurde, überwiegt die Klasse "0" in der TARGET-Variable (*y*). Auch hier wäre es möglich, in der Funktion *cv.glmnet* eine Gewichtung der einzelnen Beobachtungen mit dem Parameter *weights* mitzugeben. Dieser Schritt sollte im Zuge einer Modelloptimierung auf jeden Fall angedacht werden.
+
+```{r}
+print(cvfit_lasso)
+```
+
+Der Wert *min* in der oberen Tabelle zeigt den Lambda-Wert mit dem minimalsten *Cross-Valdation-Error*, der Wert *1se* gibt den Lambda-Wert für das minimalste Modell an, für dass der *Cross-Valdation-Error* innerhalb einer Standardabweichung zum Minimun liegt. Das Modell mit dem lambda-Wert *lambda.1se* hat deutlich weniger von 0 verschiedenen Koeffizienten im Vergleich zum Modell mit lambda-Wert *lambda.min*, allerdings hat es auch einen geringeren AUC-Wert.
+
+Im Folgenden wird das Modell für den Wert "Lambda = lambda.min" verwendet, um ein höheres Gütemaß AUC zu erhalten. Dieses Modell hat folgende von Null verschiedene Koeffizienten:
+
+
+```{r}
+Coef_lasso <- data.frame(as.matrix(coef(cvfit_lasso, s = "lambda.min"))) %>%
+  tibble::rownames_to_column(var = "Merkmal") %>%
+  dplyr::filter(s1 != 0)
+Coef_lasso
+```
+
+Insgesamt enthält das Modell `r nrow(Coef_lasso)` Koeffizienten die nicht 0 sind.
+
+**Zusammenhang mit der EDA aus R2**
+
+-   Die binären kategoriellen Merkmale *gender* und *change* haben eine ähnliche 50/50 Aufteilung der Ausprägungen (*Female*/*Male* bzw. *Ch*/*No*) und ein ähnliches Verhalten in der Abhängigkeit zur Zielvariable, trotzdem sind die Koeffizienten von *change* 0, die von *gender* nicht. Ein Grund könnte die hohe Korrelation von *change* mit *diabetesMed* sein, wodurch *change* nicht mehr zur Prognose der Zielvariable benötigt wird / nicht mehr signifikant ist.
+-   Alle Koeffizienten des Merkmals *glyburide* sind 0. Dieses Ergbnis war rein aus der EDA nicht unbedingt erwartbar, da für alle Ausprägungen ausreichend Beobachtungen vorhanden sind, und es eine - allerdings geringe - Differenz im Durchschnittswert der Zielvariable gibt. Offensichtlich sind die Differenzen zu gering, damit das Merkmal signifikant für die Prognose der Zielvariable ist.
+-   Alle nicht-kategoriellen Variablen haben einen nicht-null Koeffizienten.
+
+
+**Berechnung des AUC auf den Testdaten**
+
+Berechnung der Wahrscheinlichkeit für den Wert 1 in der Zielvariable für alle Beobachtungen im Test-Datensatz:
+
+```{r}
+xnew <- model.matrix(~ ., data = test_data_glm %>% dplyr::select(-TARGET))
+probs_lasso <- predict(cvfit_lasso, newx = xnew, s = "lambda.min", type = "response")
+```
+
+Der AUC-Wert der Testdaten ist `r MLmetrics::AUC(probs_lasso, test_data_glm$TARGET)`.
+
+```{r}
+MLmetrics::AUC(probs_lasso, test_data_glm$TARGET)
+```
+
+**Berechnung der Konfusionsmatrix mit Schwellwert 0.2**
+
+```{r}
+predicted_class_lasso <- ifelse(probs_lasso >= 0.2, 1, 0)
+conf_mat_lasso <- caret::confusionMatrix(factor(predicted_class_lasso), factor(test_data_glm$TARGET), positive = "1")
+conf_mat_lasso$table
+```
+
+Grafische Darstellung der Konfusionsmatrix:
+
+```{r}
+cm_table <- as.data.frame(conf_mat_lasso$table)
+
+ggplot(data = cm_table, aes(x = Reference, y = Prediction)) +
+  geom_tile(aes(fill = Freq), color = "white") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.background = element_rect(fill = "white", color = NA)) +
+  labs(title = "Konfusionsmatrix (Binäre Klassifikation) mit Schwelle 0.2",
+       x = "Tatsächlich", y = "Vorhergesagt")
+```
+
+
+## b) L2-Regularisierung (Ridge Regression)
+
+Aufbereitung der Datensätze für die L2-Regularisierung (sind gleich den Daten der L1-Regulierung) und Bestimmung des "optimalen" Lambda bzw. optimalen Modells über eine Kreuzvalidierung mit Hilfe der Funktion *cv.glmnet*.
+
+```{r}
+x <- model.matrix(~ ., data = train_data_glm %>% dplyr::select(-TARGET))
+y <- as.numeric(train_data_glm$TARGET) - 1
+fit_ridge <- glmnet::glmnet(x, y, alpha = 0, family = "binomial")
+```
+
+Die roten Punkte in der folgenden Grafik zeigen die Cross-Validation-Werte für den entsprechenden (log)-Lambda-Wert.
+
+```{r}
+cvfit_ridge <- glmnet::cv.glmnet(x, y, alpha = 0, family = binomial)
+plot(cvfit_ridge)
+```
+
+Wichtige Lambda-Werte:
+
+```{r}
+print(cvfit_ridge)
+```
+
+Im Folgenden wird wie im vorigen Abschnitt das Modell für den Wert "Lambda = lambda.min" verwendet. Dieses Modell hat folgende Koeffizienten:
+
+```{r}
+Coef_ridge <- data.frame(as.matrix(coef(cvfit_ridge, s = "lambda.min"))) %>%
+  tibble::rownames_to_column(var = "Merkmal") %>%
+  dplyr::filter(s1 != 0)
+Coef_ridge
+```
+
+Insgesamt enthält das Modell `r nrow(Coef_ridge)` Koeffizienten die nicht 0 sind (das sind alle Koeffizienten des Modells, da - im Gegensatz zum Lasso-Verfahren - kein Koeffizienten ausgeschlossen werden).
+
+**Berechnung des AUC auf den Testdaten**
+
+Berechnung der Wahrscheinlichkeit für den Wert 1 in der Zielvariable für alle Beobachtungen im Test-Datensatz:
+
+```{r}
+xnew <- model.matrix(~ ., data = test_data_glm %>% dplyr::select(-TARGET))
+probs_ridge <- predict(cvfit_ridge, newx = xnew, s = "lambda.min", type = "response")
+```
+
+Der AUC-Wert der Testdaten ist `r MLmetrics::AUC(probs_ridge, test_data_glm$TARGET)`.
+
+```{r}
+MLmetrics::AUC(probs_ridge, test_data_glm$TARGET)
+```
+
+**Berechnung der Konfusionsmatrix mit Schwellwert 0.2**
+
+```{r}
+predicted_class_ridge <- ifelse(probs_ridge >= 0.2, 1, 0)
+conf_mat_ridge <- caret::confusionMatrix(factor(predicted_class_ridge), factor(test_data_glm$TARGET), positive = "1")
+conf_mat_ridge$table
+```
+
+Grafische Darstellung der Konfusionsmatrix:
+
+```{r}
+cm_table <- as.data.frame(conf_mat_ridge$table)
+
+ggplot(data = cm_table, aes(x = Reference, y = Prediction)) +
+  geom_tile(aes(fill = Freq), color = "white") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.background = element_rect(fill = "white", color = NA)) +
+  labs(title = "Konfusionsmatrix (Binäre Klassifikation) mit Schwelle 0.2",
+       x = "Tatsächlich", y = "Vorhergesagt")
+```
+
+
+
+## c) Generalisiertes Additives Modell (GAM):
+
+Für das GAM-Modell werden folgende Merkmale berücksichtigt:
+
+-   20 kategorielle Merkmale mit der höchsten (absoluten) Korrelation mit der Zielvariable
+-   Ausgewählte (bzw. im zweiten Schritt alle) numerische Merkmale
+-   Wenn das gefittete Modell mit den Merkmalen aus den beiden oberen Punkten nicht die geforderte Güte aufweist (also die AUC auf den Testdaten ist nicht höher als die AUC der Logistischen Regression aus Aufgabe *R4a*), könnten die in Aufgabe *R4b* ermittelten Interaktionen mit aufgenommen werden.
+
+Zunächst werden die Trainingsdaten in eine rein numerische Matrix umgewandelt, um die Korrelationen mit der Zielvariable bestimmen zu können
+
+```{r}
+train_data_glm_num <- fac_to_num(train_data_glm, logistic = TRUE)
+```
+
+Die drei Diagnose-Merkmale *diag_1*, *diag_2* und *diag_3* werden von der Analyse ausgenommen, da sie nicht im Modell berücksichtigt werden.
+
+```{r}
+all_fac_col <- merkmale_info %>%
+  dplyr::filter(Typ == "factor",
+                Merkmal %in% colnames(train_data_glm_num)) %>%
+  dplyr::pull(Merkmal)
+all_fac_col <- all_fac_col[!(all_fac_col %in% c("diag_1", "diag_2", "diag_3", "TARGET"))] 
+```
+
+Ermittlung der 20 Merkmale mit der höchsten (absoluten) Korrelation mit der Zielvariable:
+
+```{r}
+cor_scores_fac <- sapply(train_data_glm_num[, all_fac_col], 
+                         function(x) cor(x, train_data_glm_num$TARGET, method = "spearman"))
+cor_scores_fac_sorted <- sort(abs(cor_scores_fac), decreasing = TRUE)
+(predictors_fac <- head(cor_scores_fac_sorted, 20)  %>%
+  names())  
+```
+
+Die Kurvenverläufe der numerischen Merkmale in Abschnitt *R3.3* - *Integer-Variablen (Gruppe 5)* zeigen, das kein lineares Verhalten zugrund liegt. Bisher wurde in allen Modellen (ausgenommen XGBoost) für die numerischen Merkmale indirekt ein linearer Verlauf verausgesetzt und nur ein Koeffizient für das gesamte Merkmal bestimmt.
+
+In einen GAM-Modell kann mittels Ploynomen (*I(...)*) oder Splines (*s(...)*) ein Kurvenverlauf für die einzelnen Merkmale im Modell berücksichtigt werden. Im Folgenden Ansatz wird für jedes berücksichtigte numerische Merkmal ein quadratisches Polynom verwendet, da die Kurvenverläufe in Abschnitt *R3.3* für die meisten Merkmale in den Bereichen mit vielen Beobachtungen einen annähernd quadratischen Verlauf zeigen. Speziell die Verläufe der numerischen Variablen *number_inpatient*, *time_in_hospital* und *num_medications* zeigen in den kleineren Wertebereichen mit vielen Beobachtungen diesen quadratischen Zusammenhang. Bei den beiden Variablen *number_diagnoses* und *num_lab_procedures* ist der Verlauf eher linear, dennoch wird ebenfalls ein Polynom verwendet. Alle entsprechenden Grafiken sind in Abschnitt *R3.3 Claim rates for individual features* im Teil *Integer-Variablen (Gruppe 5)* zu finden und werden hier nicht nochmals dargestellt. Der Durchschnittswert der Zielvariable pro Ausprägung ist mit einem gelben Punkt markiert und damit der Verlauf deutlich erkennbar.
+
+**Bemerkung**: Möglich wäre auch die Verwendung eines Splines, beispielsweise in der Form *s(Merkmal, k = 3)*. In diesem Fall wird für das Merkmal ein Verlauf mit drei Basisfunktionen aufgebaut.
+
+Die oben erwähnten fünf numerischen Merkmale werden im GAM-Modell berücksichtigt.
+
+```{r}
+predictors_int <- c("number_inpatient", "time_in_hospital", "num_medications", "number_diagnoses", "num_lab_procedures")
+```
+
+Erstellung der benötigten Formel und Berechnung des Modells.
+
+```{r}
+formula_str <- paste("TARGET ~", paste(c(sprintf("%s + I(%s^2)", predictors_int, predictors_int), sprintf("%s", predictors_fac)), collapse = " + "))
+gam_formula <- as.formula(formula_str)
+gam_model_5num <- mgcv::gam(gam_formula, method = "REML", data = train_data_glm, family = binomial)
+```
+
+**Berechnung des AUC auf den Testdaten**
+
+Berechnung der Wahrscheinlichkeit für den Wert 1 in der Zielvariable für alle Beobachtungen im Test-Datensatz:
+
+```{r}
+probs_gam_5num <- predict(gam_model_5num, newdata = test_data_glm, type = "response")
+```
+
+Der AUC-Wert der Testdaten ist `r MLmetrics::AUC(probs_gam_5num, test_data_glm$TARGET)`.
+
+```{r}
+MLmetrics::AUC(probs_gam_5num, test_data_glm$TARGET)
+```
+
+Vergleich mit AUC der Logistischen Regression:
+
+```{r}
+MLmetrics::AUC(probs_glm, test_data_glm$TARGET)
+```
+
+Das oben konstruierte GAM-Modell mit 20 kategoriellen Merkmalen und einen quadratischen Verlauf für alle fünf verwendeten numerischen Merkmale liefert mit `r MLmetrics::AUC(probs_gam_5num, test_data_glm$TARGET)` einen höheren AUC-Wert auf den Testdaten als das zu vergleichende Logistische Modell (AUC-Wert `r MLmetrics::AUC(probs_glm, test_data_glm$TARGET)`). Damit entfallen weitere Maßnahmen zur Verbesserung des Modell, wie beispielsweise die Hinzunahme von Interaktionen.
+
+Allerdins werden in einem zweiten Modell alle numerischen Merkmale berücksicht, um das Gütemaß nochmals zu erhöhen. Dieses zweite Modell wird in weiterer Folge verwendet.
+
+Ermittlung der Spaltennamen der numerischen Merkmale.
+
+```{r}
+predictors_int <- merkmale_info %>%
+  dplyr::filter(Merkmal %in% colnames(train_data_glm_num),
+                Typ == "integer") %>%
+  dplyr::pull(Merkmal)
+```
+
+Erstellung der benötigten Formel und Berechnung des Modells.
+
+```{r}
+formula_str <- paste("TARGET ~", paste(c(sprintf("%s + I(%s^2)", predictors_int, predictors_int), sprintf("%s", predictors_fac)), collapse = " + "))
+gam_formula <- as.formula(formula_str)
+gam_model <- mgcv::gam(gam_formula, method = "REML", data = train_data_glm, family = binomial)
+```
+
+**Berechnung des AUC auf den Testdaten**
+
+Berechnung der Wahrscheinlichkeit für den Wert 1 in der Zielvariable für alle Beobachtungen im Test-Datensatz:
+
+```{r}
+probs_gam <- predict(gam_model, newdata = test_data_glm, type = "response")
+```
+
+Der AUC-Wert der Testdaten ist `r MLmetrics::AUC(probs_gam, test_data_glm$TARGET)`.
+
+```{r}
+MLmetrics::AUC(probs_gam, test_data_glm$TARGET)
+```
+
+Vergleich mit AUC der Logistischen Regression:
+
+```{r}
+MLmetrics::AUC(probs_glm, test_data_glm$TARGET)
+```
+
+Das GAM-Modell mit 20 kategoriellen Merkmalen und einen quadratischen Verlauf für alle numerischen Merkmale liefert mit `r MLmetrics::AUC(probs_gam, test_data_glm$TARGET)` einen höheren AUC-Wert auf den Testdaten als das zu vergleichende Logistische Modell (AUC-Wert `r MLmetrics::AUC(probs_glm, test_data_glm$TARGET)`) bzw. das GAM-Modell mit fünf numerischen Merkmalen (AUC-Wert `r MLmetrics::AUC(probs_gam_5num, test_data_glm$TARGET)`).
+
+**Berechnung der Konfusionsmatrix mit Schwellwert 0.2**
+
+```{r}
+predicted_class_gam <- ifelse(probs_gam >= 0.2, 1, 0)
+conf_mat <- caret::confusionMatrix(factor(predicted_class_gam), factor(test_data_glm$TARGET), positive = "1")
+conf_mat$table
+```
+
+Grafische Darstellung der Konfusionsmatrix:
+
+```{r}
+cm_table <- as.data.frame(conf_mat$table)
+
+ggplot(data = cm_table, aes(x = Reference, y = Prediction)) +
+  geom_tile(aes(fill = Freq), color = "white") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.background = element_rect(fill = "white", color = NA)) +
+  labs(title = "Konfusionsmatrix (Binäre Klassifikation) mit Schwelle 0.2",
+       x = "Tatsächlich", y = "Vorhergesagt")
+```
+
+
+## d) Vergleich und Diskussion
+
+Alle Modelle haben ähnlich hohe AUC-Werte, insofern kann dieses Gütemaß nicht für die Entscheidung herangezogen werden.
+
+-   Logistische Regressionen ohne Interaktionen: `r MLmetrics::AUC(probs_glm, test_data_bin$TARGET)`
+-   Logistische Regression mit Interaktionen: `r MLmetrics::AUC(probs_inter, test_data_bin$TARGET)`
+-   L1-Regularisierung (LASSO): `r MLmetrics::AUC(probs_lasso, test_data_bin$TARGET)`
+-   L2-Regularisierung (Ridge Regression): `r MLmetrics::AUC(probs_ridge, test_data_bin$TARGET)`
+-   Generalisiertes Additives Modell (GAM): `r MLmetrics::AUC(probs_gam, test_data_bin$TARGET)`
+
+Die Modelle dienen dazu, ein seltenes Ereignis (frühzeitige Wiedereinweisung innerhalb von 30 Tagen) zu prognostizieren. Wichtig für eine präventive Vorsorge ist, die Wiedereinweisungen mit hoher Wahrscheinlichkeit richtig zu erkennen. Die Maßzahl *Sensitivität* (True Positive Rate) misst, wie viele Wiedereinweisungen richtig erkannt wurden. Ein Modell mit hoher Sensitivität ist somit geeignet, wesentlichen Treiber für die Wiedereinweisung zu erkennen und damit die Behandlungsansätze bzw. -qualität zu verbessern. Deshalb werden im folgenden die Sensitivitäten der einzelnem Modelle verglichen.
+
+**Bemerkung**: Die Spezifität misst, wie viele Nicht-Wiedereinweisungen richtig prognostiziert wurden. Ein Modell mit hoher Spezifität, aber niedriger Sensitivität würde somit viele Wiedereinweisungen übersehen und deshalb auch nicht geeignet sein, Treiber für die Wiedereinweisung zu finden.
+
+Die Sensitivitäten der fünf betrachteten Modelle werden abhängig von verschiedenen Schwellwerten ermittelt und übersichtlich in einer Tabelle zusammengestellt:
+
+```{r}
+probs_list <- list()
+probs_list$glm <- show_sensi(probs_glm)
+probs_list$inter <- show_sensi(probs_inter)
+probs_list$lasso <- show_sensi(probs_lasso)
+probs_list$ridge <- show_sensi(as.vector(probs_ridge))
+probs_list$gam <- show_sensi(probs_gam)
+
+name_list <- names(probs_list)
+
+tmp <- purrr::imap(probs_list, ~ {
+  df <- .x
+  df <- df[, 1:2]  # Nur erste und zweite Spalte
+  names(df)[2] <- .y  # Spaltenname umbenennen zur Listennamen
+  df
+})
+
+(vergleich <- purrr::reduce(tmp, dplyr::full_join, by = names(tmp[[1]])[1]))
+```
+
+Auch der Vergleich der Sensitivitäten bringt kein eindeutig bestes Modell. Sowohl beim Vergleich der AUC-Werte, als auch beim Vergleich der Sensitivitäten (beispielsweise mit Schwelle 0.2), schneiden die "Logistische Regression mit Interaktionen" und das "Generalisiertes Additives Modell (GAM)" am Besten ab. Aufgrund der besseren Erklärbarkeit der einzelnen Regressionskoeffizienten würde meine Wahl auf die *Logistische Regression mit Interaktionen* fallen.
+
+
+# R6: Ternäre Klassifikation
+
+## a) Evaluationsmetriken bei binärer und ternärer Klassifikation
+
+Die *AUC* (Area Under the Curve, speziell ROC-AUC) misst die Fläche unter der ROC-Kurve – also die Trade-off-Beziehung zwischen Sensitivität (True Positive Rate) und 1 - Spezifität (False Positive Rate).
+
+**Vorteile von AUC im Vergleich zur Accuracy**
+
+-   AUC ist unabhängig vom betrachteten Schwellwert, während Accuracy einen festen Schwellwert / Cutoff bewertet.
+-   AUC berücksichtigt den Trade-off zwischen Sensitivität und Spezifität und gibt ein umfassenderes Bild über die Klassifikationsleistung des Modells
+-   Die Bewertung von AUC ist unabhängig von der Klassenverteilung, während Accuracy speziell bei unbalancierten Daten stark verzerren kann. So kann beispielsweise in diesem Fall ein Modell, dass immer nur die häufigste Klasse prognostiziert, eine hohe Accuracy haben.
+
+**Nachteile von AUC im Vergleich zur Accuracy**
+
+-   AUC gibt keine Informationen über die Anzahl von Fehlklassifikationen bei einem bestimmten Schwellenwert, während Accuracy diesen Wert direkt zeigt.
+-   AUC ist im Allgemeinen schwerer interpretierbar bzw. weniger intuitiv als Accuracy.
+-   AUC kann bei unbalancierten Daten ebenfalls irreführend sein, da selbst bei einem hohen AUC viele "False Negativ"-Prognosen möglich sind.
+
+**Besonderheiten bei Mehrklassen-Klassifikation**
+
+Wie bei binärer Klassifikation, kann die Modellbewertung bei einem Datensatz mit einer dominierenden Klasse problematisch und schwierig sein. Deshalb ist es bei einer Mehrklassen-Klassifikation wichtig, auch auf die Bewertung der einzelnen Klassen zu achten und nicht nur eine Gesamtbewertung heranzuziehen.
+
+**Evaluationsmetriken für Mehrklassen-Klassifikation**
+
+-   *Accuracy*: Anteil aller korrekt klassifizierter Beobachtungen - diese Metrik ist vor allem bei ausgeglichener Klassenverteilung sinnvoll.
+-   *Balanced Accuracy*: Für eine binäre Klassifikation ist die Balanced Accuracy als Mittelwert der Sensitivität und Spezifität definiert. Für eine Mehrklassen-Klassifikation ist die Balanced Accuracy der Durchschnitt der Einzel-Accuracy (= Sensitivität) pro Klasse, wobei jede Klasse gleich stark gewichtet wird (unabhängig davon, wie häufig die Klasse in den Beobachtungen vorkommt). Da die Balanced Accuracy jede Klasse gleich stark gewichtet, ist sie hervorragend für unbalancierte Beobachtungen geeignet.
+-   *Makro-F1-Score*: Durchschnitt der F1-Scores der einzelnen Klassen, wobei jede Klasse gleich stark gewichtet wird. Der F1-Score einer Klasse ist definiert als das harmonische Mittel aus Precision und Recall für diese Klasse. Nachdem jede Klasse gleich stark gewichtet wird, ist diese Metrik ebenfalls hervorragend für unbalancierte Beobachtungen geeignet.
+
+**Bemerkung**: 
+
+-   Die *Precision* gibt an, wie viele als positiv prognostizierte Beobachtungen tatsächlich positiv waren, d.h. Precision = TP / (TP + FP)
+-   Der *Recall* gibt an, welcher Anteil von tatsächlich positiven Beobachtungen vom Modell erkannt wurden d.h. Recall = TP / (TP + FN)
+
+Die folgende Funktion *evaluate_multiclass* berechnet die oben beschriebenen Metriken *Accuracy*, *Balanced Accuracy* und *Makro-F1-Score*:
+
+```{r}
+evaluate_multiclass <- function(predicted_class, true_class) {
+  conf_mat <- caret::confusionMatrix(predicted_class, true_class)
+
+  # Accuracy
+  accuracy <- as.numeric(conf_mat$overall["Accuracy"])
+  
+  # Balanced Accuracy => Durchschnitt der Einzel-Accuracy (= Sensitivität) pro Klasse
+  balanced_accuracy <- conf_mat$byClass[, "Sensitivity"]
+  balanced_accuracy <- mean(balanced_accuracy, na.rm = TRUE)
+
+  predicted_class_int <- as.integer(predicted_class)
+  true_class_int <- as.integer(true_class)
+  
+  # Macro-F1
+  cm <- conf_mat$table
+  precision <- diag(cm) / rowSums(cm)
+  recall <- diag(cm) / colSums(cm)
+  f1 <- 2 * precision * recall / (precision + recall)
+  macro_f1 <- sum(f1, na.rm = TRUE) / length(f1)
+
+  # Rückgabe
+  result <- list()
+  result$Accuracy <- accuracy
+  result$Balanced_Accuracy <- balanced_accuracy
+  result$Macro_F1 <- macro_f1
+
+  return(result)
+}
+```
+
+## b) Ternäre Klassifikation mit Multinomialer Logistischer Regression
+
+Für die nachfolgende Modellierung werden nur jene Merkmale verwendet, die zumindest zwei Ausprägungen haben. Weiters werden die Merkmale *diag_1*, *diag_2* und *diag_3* wie vorgegeben nicht im Modell berücksichtig. In den vorigen Abschnitten wurden die Namen der zu berücksichtigenden Merkmale bereits ermittelt und in der Variable *keep_col* gespeichert.
+
+```{r}
+train_data_multi <- train_data_ter[,keep_col]
+test_data_multi <- test_data_ter[,keep_col]
+```
+
+Training des Modells mit der Funktion *multinom* (die Anzahl der maximalen Iterationen wurde auf 500 erhöht):
+
+```{r}
+multilog_model <- nnet::multinom(TARGET ~ ., data = train_data_multi, family = binomial, maxit = 500)
+```
+
+Schätzung der Wahrscheinlichkeit pro Klasse für die Beobachtungen des Testdatensatz:
+
+```{r}
+probs_multinom <- predict(multilog_model, newdata = test_data_multi, type = "probs")
+```
+
+Die folgende Funktion *probs_predict* dient zur Optimierung der Klassenschwellen, um die Verteilung der Prognosen an die tatsächliche Verteilung der TARGET-Variable anzunähern. Die Idee für die Optimierung ist, einen Schwellwert für die erste und zweite Klasse vorzugeben. Liegt die prognostizierte Wahrscheinlichkeit für die erste Klasse über dem ersten Schwellwert, so ist die Prognose die "Klasse 1". Ist dies nicht der Fall, wird geprüft, ob die prognostizierte Wahrscheinlichkeit für die zweite Klasse über dem zweiten Schwellwert liegt. Ist das der Fall, so ist die Prognose "Klasse 2", andernfalls "Klasse 3".
+
+```{r}
+probs_predict <- function(probs, p1, p2) {
+  probs[,1] <- (probs[,1] >= p1)
+  probs[,2] <- ((probs[,1] < p1) & (probs[,2] >= p2))
+  probs[,3] <- 1 - probs[,1] - probs[,2] # (probs[,1] < p1) & (probs[,2] < 0.5)
+  
+  if (sum(probs) != nrow(probs)) {
+    print("Problem")
+  }
+  
+  pred <- as.integer(max.col(probs))
+  pred <- factor(pred, levels = 1:length(levels(test_data_multi$TARGET)), labels = levels(test_data_multi$TARGET))
+  return(pred)
+}
+```
+
+Die Optimierung der Klassenschwellwerte erfolgt mit einer Schrittweite von 0.05 für beide Schwellwerte.
+
+```{r}
+uebersicht <- NULL
+for (p1 in seq(0, 0.95, 0.05)) {
+  for (p2 in seq(0, 0.95, 0.05)) {
+    probs <- probs_multinom
+    
+    pred <- probs_predict(probs, p1, p2)
+    tmp <- evaluate_multiclass(pred, test_data_multi$TARGET)
+    
+    tmp_df <- data.frame(p1 = p1, 
+                         p2 = p2,
+                         Accuracy = tmp$Accuracy,
+                         Balanced_Accuracy = tmp$Balanced_Accuracy,
+                         Macro_F1 = tmp$Macro_F1)
+      
+    uebersicht <- rbind(uebersicht, tmp_df)
+  }
+}  
+```
+
+**Analyse für die Metrik "Accuracy"**
+
+Für die Berechnung der endgültigen Prognose werden jene Schwellwerte verwendet, für die die Metrik *Accuracy* maximiert wird. Die folgende Tabelle zeigt eine Übersicht über die 10 Schwellwerte mit den höchsten Werten für diese Metrik.
+
+```{r}
+best_multinom_acc <- uebersicht %>%
+  dplyr::arrange(desc(Accuracy)) %>%
+  head(10)
+best_multinom_acc
+```
+
+Prognose der Testdaten und Berechnung der Konfusionsmatrix:
+
+```{r}
+pred_multinom_acc <- probs_predict(probs_multinom, p1 = best_multinom_acc$p1[1], p2 = best_multinom_acc$p2[1])
+conf_mat_multinom_acc <- caret::confusionMatrix(pred_multinom_acc, test_data_multi$TARGET)
+conf_mat_multinom_acc$table
+```
+
+Grafische Darstellung der Konfusionsmatrix:
+
+```{r}
+cm_table <- as.data.frame(conf_mat_multinom_acc$table)
+
+ggplot(data = cm_table, aes(x = Reference, y = Prediction)) +
+  geom_tile(aes(fill = Freq), color = "white") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.background = element_rect(fill = "white", color = NA)) +
+  labs(title = "Konfusionsmatrix (Ternäre Klassifikation) mit Metrik Accuracy",
+       x = "Tatsächlich", y = "Vorhergesagt")
+```
+
+Die Klasse "No" ist die dominierende Klasse der Zielvariable. Typischerweise für unbalancierten Beobachtungen, wird in der Metik *Accuracy* die dominierende Klasse bevorzugt bzw. überschätzt (siehe z.B. die Anzahl für vorhergesagt "No" und tatsächlich ">30").
+
+**Analyse für die Metrik "Balanced Accuracy"**
+
+Für die Berechnung der endgültigen Prognose werden jene Schwellwerte verwendet, für die die Metrik *Balanced Accuracy* maximiert wird. Die folgende Tabelle zeigt eine Übersicht über die 10 Schwellwerte mit den höchsten Werten für diese Metrik.
+
+```{r}
+best_multinom_balacc <- uebersicht %>%
+  dplyr::arrange(desc(Balanced_Accuracy)) %>%
+  head(10)
+best_multinom_balacc
+```
+
+Prognose der Testdaten und Berechnung der Konfusionsmatrix:
+
+```{r}
+pred_multinom_balacc <- probs_predict(probs_multinom, p1 = best_multinom_balacc$p1[1], p2 = best_multinom_balacc$p2[1])
+conf_mat_multinom_balacc <- caret::confusionMatrix(pred_multinom_balacc, test_data_multi$TARGET)
+conf_mat_multinom_balacc$table
+```
+
+Grafische Darstellung der Konfusionsmatrix:
+
+```{r}
+cm_table <- as.data.frame(conf_mat_multinom_balacc$table)
+
+ggplot(data = cm_table, aes(x = Reference, y = Prediction)) +
+  geom_tile(aes(fill = Freq), color = "white") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.background = element_rect(fill = "white", color = NA)) +
+  labs(title = "Konfusionsmatrix (Ternäre Klassifikation) mit Metrik Balanced Accuracy",
+       x = "Tatsächlich", y = "Vorhergesagt")
+```
+
+Die Konfusionsmatrix zeigt, dass insgesamt weniger Prognosen im Vergleich zur Metrik *Accuracy* korrekt sind, allerdings die beiden kleineren aber wichtigeren Klassen "<30" und ">30" deutlich öfters richtig prognostiziert wurde.
+
+**Analyse für die Metrik "Macro-F1-Score"**
+
+Für die Berechnung der endgültigen Prognose werden jene Schwellwerte verwendet, für die die Metrik *Macro-F1-Score* maximiert wird. Die folgende Tabelle zeigt eine Übersicht über die 10 Schwellwerte mit den höchsten Werten für diese Metrik.
+
+```{r}
+best_multinom_macf1 <- uebersicht %>%
+  dplyr::arrange(desc(Macro_F1)) %>%
+  head(10)
+best_multinom_macf1
+```
+
+Prognose der Testdaten und Berechnung der Konfusionsmatrix:
+
+```{r}
+pred_multinom_macf1 <- probs_predict(probs_multinom, p1 = best_multinom_macf1$p1[1], p2 = best_multinom_macf1$p2[1])
+conf_mat_multinom_macf1 <- caret::confusionMatrix(pred_multinom_macf1, test_data_multi$TARGET)
+conf_mat_multinom_macf1$table
+```
+
+Grafische Darstellung der Konfusionsmatrix:
+
+```{r}
+cm_table <- as.data.frame(conf_mat_multinom_macf1$table)
+
+ggplot(data = cm_table, aes(x = Reference, y = Prediction)) +
+  geom_tile(aes(fill = Freq), color = "white") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.background = element_rect(fill = "white", color = NA)) +
+  labs(title = "Konfusionsmatrix (Ternäre Klassifikation) mit Metrik Makro-F1-Score",
+       x = "Tatsächlich", y = "Vorhergesagt")
+```
+
+Die Konfusionsmatrix zeigt, dass im Vergleich zur Metrik *Accuracy* weniger Prognosen korrekt sind, allerdings die beiden kleineren aber wichtigeren Klassen "<30" und ">30" häufiger richtig prognostiziert wurden. Im Vergleich zu *Balanced Accuracy* sind die kleineren Klassen nicht so häufig korrekt. 
+
+
+## c) Ternäre Klassifikation mit XGBoost
+
+Wie im Aufgabe *R3* werden zunächst die Daten für den XGBoost-Algorithmus vorbereitet.
+
+```{r}
+train_data_ter_num <- fac_to_num(train_data_ter, logistic = TRUE)
+val_data_ter_num <- fac_to_num(val_data_ter, logistic = TRUE)
+test_data_ter_num <- fac_to_num(test_data_ter, logistic = TRUE)
+
+dtrain_ter <- xgboost::xgb.DMatrix(as.matrix(train_data_ter_num %>% dplyr::select(-TARGET)),label = train_data_ter_num$TARGET)
+dvalid_ter <- xgboost::xgb.DMatrix(as.matrix(val_data_ter_num %>% dplyr::select(-TARGET)),label = val_data_ter_num$TARGET)
+dtest_ter <- xgboost::xgb.DMatrix(as.matrix(test_data_ter_num %>% dplyr::select(-TARGET)))
+```
+
+**Bemerkungen**: 
+
+-   Aus der Aufgabenstellung war nicht klar, welche der drei betrachteten Metriken beim Training als Loss-Funktion verwendet werden soll (bzw. ob drei verschiedene Modelle mit jeweils einer anderen Metrik zu erstellen sind). Im Folgenden werden für alle drei Metriken die entsprechenden Loss-Funktionen definiert, für das zur Analyse verwendete Modell wird *Balanced Accuracy* verwendet, da für dieses Modell die häufigsten richtigen Prognosen für die beiden kleineren Klassen "<30" und ">30" erwartet werden - siehe vorigen Abschnitt.
+-   Für die Analyse der Modell mit Loss-Funktion *Accuracy* bzw. *Makro-F1-Score* können dieselben Formeln wie für die verwendete *Balanced Accuracy* werden, in der Liste *xgb_ter_params* muss lediglich die entsprechende Funktion im Parameter *eval_metric* eingetragen werden.
+-   Wie in den Definitionen der Loss-Funktion ersichtlich, wird als Prognosewert für eine Beobachtung die Ausprägung mit der höchsten Wahrscheinlichkeit genommen ("pred_labels <- max.col(matrix(preds, ncol = 3, byrow = TRUE)) - 1"). Im Sinne der geforderten Optimierung der Klassenschwellwerte müsste eigentlich für jede Schwanke *p1* und *p2* mit der oben definierten Funktion *probs_predict* ein eigenes Modell für diese Schranken berechnet werden. Das würde allerdings einen erheblich erhöhten Rechenaufwand bedeuten. Im unten gewählten Vorgehen wird nur ein Modell mit der Schätzung anhand der höchsten Wahrscheinlichkeit pro Ausprägung entwickelt, und mit diesem Modell die Klassenschwellwerte optimiert.
+
+**Loss-Funktion für die Metrik "Accuracy"**
+
+```{r}
+xgb_accuracy <- function(preds, dtrain) {
+  labels <- xgboost::getinfo(dtrain, "label")
+  pred_labels <- max.col(matrix(preds, ncol = 3, byrow = TRUE)) - 1
+  
+  cm <- table(factor(pred_labels, levels = 0:2), factor(labels, levels = 0:2))
+  
+  accuracy <- sum(diag(cm)) / sum(cm)
+  
+  list(metric = "accuracy", value = accuracy)
+}
+```
+
+**Loss-Funktion für die Metrik "Balanced Accuracy"**
+
+```{r}
+xgb_balanced_accuracy <- function(preds, dtrain) {
+  labels <- getinfo(dtrain, "label")
+  pred_labels <- max.col(matrix(preds, ncol = 3, byrow = TRUE)) - 1
+  
+  # Confusion matrix
+  cm <- table(factor(pred_labels, levels = 1:3), factor(labels, levels = 1:3))
+  sensitivity <- diag(cm) / colSums(cm)
+  balanced_acc <- mean(sensitivity, na.rm = TRUE)
+  
+  list(metric = "balanced_accuracy", value = balanced_acc)
+}
+```
+
+**Loss-Funktion für die Metrik "Makro-F1-Score"**
+
+```{r}
+xgb_macro_f1 <- function(preds, dtrain) {
+  labels <- xgboost::getinfo(dtrain, "label")
+  pred_labels <- max.col(matrix(preds, ncol = 3, byrow = TRUE)) - 1
+  
+  cm <- table(factor(pred_labels, levels = 0:2), factor(labels, levels = 0:2))
+  
+  precision <- diag(cm) / rowSums(cm)
+  recall <- diag(cm) / colSums(cm)
+  f1 <- 2 * precision * recall / (precision + recall)
+  macro_f1 <- sum(f1, na.rm = TRUE) / length(f1)
+  
+  list(metric = "macro_f1", value = macro_f1)
+}
+```
+
+Parameter für den XGBoost-Algorithmus. Die Anzahl der zu schätzenden Klassen muss als Paramater *nun_class* angegeben werden.
+
+```{r}
+xgb_ter_params <- list(
+  colsample_bytree = 1,  
+  subsample = 1,  
+  booster = "gbtree",
+  max_depth = 5,
+  eta = 0.3, 
+  eval_metric = xgb_balanced_accuracy,
+  objective = "multi:softprob",
+  num_class = 3, # Anzahl der zu schätzenden Klassen
+  nthread = 1
+)
+```
+
+Bestimmug der optimalen Baumtiefe durch Cross-Validation
+
+```{r}
+watchlist <- list(train = dtrain_ter, valid = dvalid_ter)
+
+set.seed(1234)
+xgb_ter_cv <- xgboost::xgb.cv(xgb_ter_params, 
+                              dtrain_ter, 
+                              early_stopping_rounds = 5, 
+                              nfold = 5, 
+                              print_every_n = 5,
+                              nrounds = 500, 
+                              maximize = TRUE)
+```
+
+Auslese der optimalen Baumtiefe (`r xgb_ter_cv$best_iteration`), die für das Modell-Training verwendet wird.
+
+```{r}
+best_nrounds <- xgb_ter_cv$best_iteration
+
+set.seed(1234)
+xgb_ter_model <- xgboost::xgb.train(params = xgb_ter_params,
+                                    data = dtrain_ter,
+                                    print_every_n = 5,
+                                    watchlist = watchlist,
+                                    nrounds = best_nrounds,
+                                    maximize = TRUE)
+```
+
+Schätzung der Wahrscheinlichkeit pro Klasse: die geschätzten Werte werden im XGBoost-Predictor als Vektor zurückgegeben. Dieser muss für die spätere Verwendung in eine Matrix umgewandelt werden.
+
+```{r}
+probs_xgb_ter <- predict(xgb_ter_model, newdata = dtest_ter)
+num_class <- 3  # Anzahl deiner Klassen
+probs_xgb_ter <- matrix(probs_xgb_ter, ncol = num_class, byrow = TRUE)
+colnames(probs_xgb_ter) <- levels(test_data_ter$TARGET)
+```
+
+Die Optimierung der Klassenschwellwerte erfolgt mit einer Schrittweite von 0.05 für beide Schwellwerte.
+
+```{r}
+uebersicht <- NULL
+for (p1 in seq(0, 0.95, 0.05)) {
+  for (p2 in seq(0, 0.95, 0.05)) {
+    probs <- probs_xgb_ter
+    
+    pred <- probs_predict(probs, p1, p2)
+    tmp <- evaluate_multiclass(pred, test_data_multi$TARGET)
+    
+    tmp_df <- data.frame(p1 = p1, 
+                         p2 = p2,
+                         Accuracy = tmp$Accuracy,
+                         Balanced_Accuracy = tmp$Balanced_Accuracy,
+                         Macro_F1 = tmp$Macro_F1)
+    
+    
+    uebersicht <- rbind(uebersicht, tmp_df)
+  }
+}  
+
+```
+
+**Analyse für die Metrik "Accuracy"**
+
+Für die Berechnung der endgültigen Prognose werden jene Schwellwerte verwendet, für die die Metrik *Accuracy* maximiert wird. Die folgende Tabelle zeigt eine Übersicht über die 10 Schwellwerte mit den höchsten Werten für diese Metrik.
+
+```{r}
+best_xgb_ter_acc <- uebersicht %>%
+  dplyr::arrange(desc(Accuracy)) %>%
+  head(10)
+best_xgb_ter_acc
+```
+
+Prognose der Testdaten und Berechnung der Konfusionsmatrix:
+
+```{r}
+pred_xgb_ter_acc <- probs_predict(probs_xgb_ter, p1 = best_xgb_ter_acc$p1[1], p2 = best_xgb_ter_acc$p2[1])
+conf_mat_xgb_ter_acc <- caret::confusionMatrix(pred_xgb_ter_acc, test_data_multi$TARGET)
+conf_mat_xgb_ter_acc$table
+```
+
+Grafische Darstellung der Konfusionsmatrix:
+
+```{r}
+cm_table <- as.data.frame(conf_mat_xgb_ter_acc$table)
+
+ggplot(data = cm_table, aes(x = Reference, y = Prediction)) +
+  geom_tile(aes(fill = Freq), color = "white") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.background = element_rect(fill = "white", color = NA)) +
+  labs(title = "Konfusionsmatrix (Ternäre Klassifikation) mit Metrik Accuracy",
+       x = "Tatsächlich", y = "Vorhergesagt")
+```
+
+Wie im vorigen Abschnitt, ist auch hier die Klasse “No” die dominierende Klasse in der Prognose der Zielvariable. Typischerweise für unbalancierten Beobachtungen wird in der Metik Accuracy die dominierende Klasse bevorzugt bzw. überschätzt (siehe z.B. die Anzahl für vorhergesagt “No” und tatsächlich “>30”).
+
+Ein Vergleich der Konfusionsmatrix des XGBoost-Modells mit der Konfusionsmatrix der Multinomialer Logistischer Regression jeweils mit der Metrik *Accuracy* zeigt, dass die beiden kleineren Klassen "<30" und ">30" mit dem XGBoost-Modell deutlich öfters richtig erkannt wurden.
+
+Konfusionsmatrix des XGBoost-Modells mit Metrik *Accuracy*:
+
+```{r}
+conf_mat_xgb_ter_acc$table
+```
+
+Konfusionsmatrix der Multinomialer Logistischer Regression mit Metrik *Accuracy*:
+
+
+```{r}
+conf_mat_multinom_acc$table
+```
+
+
+**Analyse für die Metrik "Balanced Accuracy"**
+
+Für die Berechnung der endgültigen Prognose werden jene Schwellwerte verwendet, für die die Metrik *Balanced Accuracy* maximiert wird. Die folgende Tabelle zeigt eine Übersicht über die 10 Schwellwerte mit den höchsten Werten für diese Metrik.
+
+```{r}
+best_xgb_ter_balacc <- uebersicht %>%
+  dplyr::arrange(desc(Balanced_Accuracy)) %>%
+  head(10)
+best_xgb_ter_balacc
+```
+
+Prognose der Testdaten und Berechnung der Konfusionsmatrix:
+
+```{r}
+pred_xgb_ter_balacc <- probs_predict(probs_xgb_ter, p1 = best_xgb_ter_balacc$p1[1], p2 = best_xgb_ter_balacc$p2[1])
+conf_mat_xgb_ter_balacc <- caret::confusionMatrix(pred_xgb_ter_balacc, test_data_multi$TARGET)
+conf_mat_xgb_ter_balacc$table
+```
+
+Grafische Darstellung der Konfusionsmatrix:
+
+```{r}
+cm_table <- as.data.frame(conf_mat_xgb_ter_balacc$table)
+
+ggplot(data = cm_table, aes(x = Reference, y = Prediction)) +
+  geom_tile(aes(fill = Freq), color = "white") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.background = element_rect(fill = "white", color = NA)) +
+  labs(title = "Konfusionsmatrix (Ternäre Klassifikation) mit Metrik Balanced Accuracy",
+       x = "Tatsächlich", y = "Vorhergesagt")
+```
+
+Wieder gelten auch hier dieselben Aussagen wie im vorigen Abschnitt. Die Konfusionsmatrix zeigt, dass im Vergleich zur Metrik *Accuracy* insgesamt weniger Prognosen korrekt sind, allerdings die beiden kleineren aber wichtigeren Klassen “<30” und “>30” deutlich öfters richtig prognostiziert wurden.
+
+Ein Vergleich der Konfusionsmatrix des XGBoost-Modells mit der Konfusionsmatrix der Multinomialer Logistischer Regression jeweils mit der Metrik *Balanced Accuracy* zeigt, dass die Klasse "<30" mit dem XGBoost-Modell deutlich öfters richtig erkannt wurde, die Klassen ">30" und "No" mit der Multinomialer Logistischer Regression.
+
+Konfusionsmatrix des XGBoost-Modells mit Metrik *Balanced Accuracy*:
+
+```{r}
+conf_mat_xgb_ter_balacc$table
+```
+
+Konfusionsmatrix der Multinomialer Logistischer Regression mit Metrik *Balanced Accuracy*:
+
+
+```{r}
+conf_mat_multinom_balacc$table
+```
+
+
+**Analyse für die Metrik "Macro-F1-Score"**
+
+Für die Berechnung der endgültigen Prognose werden jene Schwellwerte verwendet, für die die Metrik *Macro-F1-Score* maximiert wird. Die folgende Tabelle zeigt eine Übersicht über die 10 Schwellwerte mit den höchsten Werten für diese Metrik.
+
+```{r}
+best_xgb_ter_macf1 <- uebersicht %>%
+  dplyr::arrange(desc(Macro_F1)) %>%
+  head(10)
+best_xgb_ter_macf1
+```
+
+Prognose der Testdaten und Berechnung der Konfusionsmatrix:
+
+```{r}
+pred_xgb_ter_macf1 <- probs_predict(probs_xgb_ter, p1 = best_xgb_ter_macf1$p1[1], p2 = best_xgb_ter_macf1$p2[1])
+conf_mat_xgb_ter_macf1 <- caret::confusionMatrix(pred_xgb_ter_macf1, test_data_multi$TARGET)
+conf_mat_xgb_ter_macf1$table
+```
+
+Grafische Darstellung der Konfusionsmatrix:
+
+```{r}
+cm_table <- as.data.frame(conf_mat_xgb_ter_macf1$table)
+
+ggplot(data = cm_table, aes(x = Reference, y = Prediction)) +
+  geom_tile(aes(fill = Freq), color = "white") +
+  geom_text(aes(label = Freq), vjust = 1) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.background = element_rect(fill = "white", color = NA)) +
+  labs(title = "Konfusionsmatrix (Ternäre Klassifikation) mit Metrik Makro-F1-Score",
+       x = "Tatsächlich", y = "Vorhergesagt")
+```
+
+Die Konfusionsmatrix zeigt, dass im Vergleich zur Metrik *Accuracy* weniger Prognosen korrekt sind, allerdings die beiden kleineren aber wichtigeren Klassen “<30” und “>30” häufiger richtig prognostiziert wurden. Im Vergleich zu *Balanced Accuracy* sind die kleineren Klassen nicht so häufig korrekt.
+
+Auch hier zeigt ein Vergleich der Konfusionsmatrix des XGBoost-Modells mit der Konfusionsmatrix der Multinomialer Logistischer Regression jeweils mit der Metrik *Macro-F1-Score*, dass die Klasse "<30" mit dem XGBoost-Modell deutlich öfters richtig erkannt wurde, die Klassen ">30" und "No" mit der Multinomialer Logistischer Regression.
+
+Konfusionsmatrix des XGBoost-Modells mit Metrik *Macro-F1-Score*:
+
+```{r}
+conf_mat_xgb_ter_macf1$table
+```
+
+Konfusionsmatrix der Multinomialer Logistischer Regression mit Metrik *Macro-F1-Score*:
+
+
+```{r}
+conf_mat_multinom_macf1$table
+```
+
+Insgesamt zeigt sich, dass für alle drei betrachteten Metriken das XGBoost-Modell die Klasse "<30" im Vergleich zur Multinomialer Logistischer Regression deutlich häufiger richtig prognostiziert. Falls die Ausmerksamkeit auf dieser Klasse liegt, ist das XGBoost-Modell zu bevorzugen. 
+
+
+## d) One-vs-One
+
+Die Aufgabenstellung wird folgendermaßen verstanden und durchgeführt:
+
+-   Ausgangsbasis ist das Modell für die ternäre Klassifikation mit Multinomialer Logistischer Regression.
+-   Für jeweils zwei Ausprägungen der TARGET-Variable ("<30", ">30", "No") werden jene Bebobachtungen aus den Testdaten gefiltert, die eine der beiden Ausprägungen haben.
+-   Aus dem Modell für die ternäre Klassifikation gibt es für jede Beobachtung eine Wahrscheinlichkeit für die Prognose der beiden Ausprägungen. Die Summe der beiden Wahrscheinlichkeiten ist allerdings nicht 1, da die dritte - nicht betrachtete Ausprägung - in der ternäre Klassifikation ebenfalls eine Wahrscheinlichkeit > 0 hat. Deshalb werden die Wahrscheinlichkeiten der beiden gewählten Ausprägungen für jede Beobachtung auf die Summe 1 normiert.
+-   Die Zielvariable im gefilterten Testbestand wird 0 / 1 codiert.
+-   Der AUC-Wert wird aus dem gefilterten Datensatz und den normierten Wahrscheinlichkeiten berechnet.
+
+Die nachfolgende Funktion *one_vs_one* führt die oben beschriebenen Schritte für zwei vorgebenen Spalten *Spalte_1* und *Spalte_2* durch. Die Spaltennummer steht einerseits für die Spalte der im vorigen Abschnitt berechneten Wahrscheinlichkeiten *probs_multinom* für die einzelnen Ausprägungen / Klassen in der Multinomialer Logistischer Regression ...
+
+```{r}
+head(probs_multinom, 10)
+```
+
+... andererseits für die Position der Ausprägung in den Levels der Zielvariablen:
+
+```{r}
+(factor_levels <- levels(test_data_multi$TARGET))
+```
+
+Definition der Funktion *one_vs_one*:
+
+```{r}
+one_vs_one <- function(Spalte_1, Spalte_2) {
+  rueckgabe <- list()
+  
+  Klasse_0 <- factor_levels[Spalte_1]
+  Klasse_1 <- factor_levels[Spalte_2]
+
+  in_klassen <- test_data_multi$TARGET %in% c(Klasse_0,Klasse_1) # Prüft, ob die Beobachtung in eine der beiden Klassen fällt
+  tmp_test_data_multi <-  test_data_multi[in_klassen,] %>%
+    dplyr::mutate(TARGET_klasse = ifelse(TARGET == Klasse_0, 0, 1))
+
+  # Die entsprechenden Spalten aus der Wahrscheinlichkeits-Tabelle werden gefiltert und jede Zeile auf 1 normiert
+  tmp_probs <- probs_multinom[in_klassen,c(Klasse_0,Klasse_1)]
+  tmp_probs <- tmp_probs / rowSums(tmp_probs)
+
+  # Für die Berechnung der AUC wird die zweite Spalte berechnet, da hier die Wahrscheinlichkeit für die 
+  # TARGET_klasse "1" steht.
+  AUC <- MLmetrics::AUC(tmp_probs[,2], tmp_test_data_multi$TARGET_klasse)
+  
+  predicted_class <- ifelse(tmp_probs[,2] >= 0.2, 1, 0)
+  conf_mat <- caret::confusionMatrix(factor(predicted_class), factor(tmp_test_data_multi$TARGET_klasse), positive = "1")
+  conf_mat$table  
+  
+  rueckgabe_df <- data.frame(Klasse_0 = Klasse_0,
+                             Klasse_1 = Klasse_1,
+                             Anzahl = sum(in_klassen),
+                             AUC = AUC) 
+  
+  print(rueckgabe_df)
+  
+  rueckgabe$conf_mat <- conf_mat
+  rueckgabe$df <- rueckgabe_df
+    
+  return(rueckgabe)
+}
+```
+
+**Binäre Klassifikation der Klassen `r factor_levels[1]` und `r factor_levels[2]`**
+
+```{r}
+tmp_1_2 <- one_vs_one(1,2)
+```
+
+**Binäre Klassifikation der Klassen `r factor_levels[1]` und `r factor_levels[3]`**
+
+```{r}
+tmp_3_1 <- one_vs_one(3,1) 
+```
+
+Der Aufruf erfolgt in Form (3,1), damit wie in Abschnitt *R1 g)* der Klasse "No" der Wert 0 und der Klasse "<30" der Wert 1 zugewiesen wird. Damit sind die Ergebnisse (Konfusionsmatrix) mit den Ergebnissen aus Aufgabe *R4* vergleichbar. 
+
+Das Modell für die ternäre Klassifikation zeigt - eingeschränkt auf die beiden Ausprägungen in Aufgabe *R4* - mit `r tmp_3_1$df$AUC` einen geringfügig höheren AUC-Wert im Vergleich zum entsprechenden binären Modell mit `r MLmetrics::AUC(probs_glm, test_data_glm$TARGET)`.
+
+Die beiden Modelle liefern eine ähnliche Aufteilung der Konfusionsmatrix, wie folgende Auswertungen zeigen:
+
+*Konfusionsmatrix der logistischen Regression aus Aufgabe "R4"*:
+
+```{r}
+conf_mat_glm$table
+```
+
+*Konfusionsmatrix der "one_vs_one"-Analyse*:
+
+```{r}
+tmp_3_1$conf_mat$table
+```
+
+Eine nähere Betrachtung zeigt, dass auch andere Gütemaße (Sensitifität, Spezifität, ...) ähnlich Größenordnungen aufweisen:
+
+*Gütemaße der logistischen Regression aus Aufgabe "R4"*:
+
+```{r}
+conf_mat_glm
+```
+
+*Gütemaße der "one_vs_one"-Analyse*:
+
+```{r}
+tmp_3_1$conf_mat
+```
+
+
+**Binäre Klassifikation der Klassen `r factor_levels[2]` und `r factor_levels[3]`**
+
+```{r}
+tmp_3_2 <- one_vs_one(3,2)
+```
+
+Die drei Ergebnisse zeigen, dass die Einschränkung des Modells für ternäre Klassifikation auf die binäre Klassifikation für alle gewählten Klassenpaare einen hohen AUC-Wert liefert. Lediglich die erste Auswertung für die Kombination der kleineren Klassen "<30" und ">30" fällt mit `r tmp_1_2$AUC` ein wenig ab, liefert aber dennoch einen relativ hohen Wert. Dies zeigt, dass das Modells für die ternäre Klassifikation keinen "systematischen Fehler" enthält und Beziehungen zwischen zwei Klassen zufriedenstellend berücksichtig.
+
+Speziell der Vergleich mit der binären logistischen Regression aus Aufgabe *R4* zeigt, dass die Ergebnisse der beiden Modell weitgehend übereinstimmen.
+
+
+## e) Fazit
+
+Die Analysen in den Abschnitten *R3* und *R4* zeigen, dass alle betrachteten Modelle für die binäre Klassifikation ähnliche Werte im Gütemaß AUC haben. Den höchsten AUC-Wert liefert das XGBoost-Modell mit `r MLmetrics::AUC(probs_xgb, test_data_bin$TARGET)`. Der Grund könnte sein, dass im XGBoost-Modell die Interaktionen der Merkmale in natürlicher Weise berücksichtigt werden, während sie in allen anderen Modellen von außen vorgegeben werden müssen. Zusätzlich wird für numerische Variablen im XGBoost-Modell kein linearer Zusammenhang modelliert, sondern ein allgemeinerer. Allerdings ist es im oben konstruierten XGBoost-Modell im Vergleich zu den restlichen Modellen schwieriger, den Einfluss der einzelnen Ausprägungen eines kategoriellen Merkmals auf die Zielvariable zu bewerten. Eine Möglichkeit, diese Bewertung zu erhalten wäre, ein One-Hot-Encoding der kategoriellen Merkmale zu verwenden, da in diesem Fall jede Ausprägung einzel im Modell berücksichtigt wird. In allen anderen Modellen erfolgt die Bewertung der einzelnen Ausprägungen der kategoriellen Merkmale direkt, da für jede Ausprägung ein eigener Koeffizient berechnet wird und darauf direkt der Einfluss auf die Zielvariable ablesbar ist.
+
+Soll das Modell nicht nur zur Prognose der Wahrscheinlichkeit einer frühzeitigen Wiedereinweisung verwendet werden, sondern steht die Analyse der Einflussgrößen und Treiber für die frühzeitigen Wiedereinweisung im Vordergrund, so wäre eine Logistische Regressionen mit Interaktionen oder ein GAM-Modell die erste Wahl.
+
+Die beiden Modell für die ternäre Klassifikation haben im Vergleich zur binären Klassifikation den Vorteil, dass mit ihnen weitergreifende Analysen möglich sind. So lassen sich nicht nur Treiber für eine frühzeitige Wiedereinweisung "<30" analysieren, sondern die Treiber für eine generelle Wiedereinweisung. Wie die Ergebnisse aus Abschnitt *d)* zeigen, können mit diesen allgemeineren Modellen auch Aussagen hoher Güte für das Verhalten paarweise Klassen getroffen werden. Allerdings lassen sich aus den allgemeineren Modellen nur unzureichend Einflussgrößen und Treiber für paarweise Klassenverhalten ableiten, wie die folgende Analyse zeigt. Die Funktion *Var_Imp_lm_Plot* dient dabei zur Darstellung der Feature Importance in logistischen Regressionsmodellen.
+
+```{r}
+Var_Imp_lm_Plot <- function(vi_in, n = 10, clusters = 4) {
+  Imp_lm <- list()
+  Imp_lm$Feature <- rownames(vi_in)
+  Imp_lm$Gain <- vi_in$Overall / sum(vi_in$Overall)
+  Imp_lm$Cover <- Imp_lm$Gain
+  Imp_lm$Frequency <- Imp_lm$Gain
+  Imp_lm$Importance <- Imp_lm$Gain
+  Imp_lm <- data.table::as.data.table(Imp_lm)
+  xgboost::xgb.ggplot.importance(Imp_lm, top_n = n, n_clusters = clusters)
+}
+```
+
+**Feature Importance der Logistischen Regression ohne Interaktionen** aus Abschnitt *R4 a)*:
+
+```{r}
+vi_glm <- caret::varImp(glm_model, scale = FALSE) %>%
+    dplyr::arrange(desc(Overall))
+Var_Imp_lm_Plot(vi_glm)
+```
+
+**Feature Importance der Ternären Multinomialen Logistischen Regression** aus Abschnitt *R6 b)*:
+  
+```{r}
+vi_multilog <- caret::varImp(multilog_model, scale = FALSE) %>%
+  dplyr::arrange(desc(Overall))
+Var_Imp_lm_Plot(vi_multilog)
+```
+
+Ein Vergleich der beiden Grafiken zeigt, dass unterschiedliche Hauptreiber für die beiden Modelle gefunden wurden. Der Grund liegt vor allem darin, dass das Modell für ternäre Klassifikation auch Einflussgrößen der dritten Klasse ">30" enthält. Diese Klasse wird auch von den zusätzlichen in der Modellierung berücksichten Beobachtungen getrieben.
+
+Eine allgemeine bzw. endgültige Empfehlung eines Modells ist schwierig und hängt vom Ziel der Modellanwendung ab. Bezogen auf die frühzeitige Wiedereinweisung (d.h. die Klasse "<30"), liefern die XGBoost-Modelle sowohl für binäre als auch für ternäre Klassifikation die besseren Prognoseergebnisse, (auch) da sie Interaktionen der Merkmale im Modell berücksichtigen. Allerdings ist es schwieriger, den Einfluss der einzelnen Ausprägungen eines kategoriellen Merkmals auf die Zielvariable zu bewerten.
+
+Ist das Ziel, nicht nur eine möglichst zuverlässige Prognose der Wahrscheinlichkeit einer frühzeitigen Wiedereinweisung ("<30") zu erhalten, sondern auch Ausschlüsse über die Einflussgrößen und Treiber zu bekommen, so ist ein binäres Klassifikationsmodell einem ternären Klassenmodell vorzuziehen. In diesem Fall wäre es auch überlegenswert, die gesamte Datenbasis zu verwenden und die Klasse ">30" der Klasse "NO" gleichzusetzen, um alle vorhandenen Beobachtungen nützen zu können. Für die Ableitung der Einflussgrößen und Treiber wäre wieder eine Logistische Regressionen mit Interaktionen oder ein GAM-Modell die erste Wahl.
+
+
+# Übersicht: sessionInfo()
+
+```{r}
+sessionInfo()
+```
