@@ -1,0 +1,2695 @@
+---
+title: 'Actuarial Data Science Immersion - Part I'
+author: "Chow Chun Mun" 
+date: "13-05-2025"
+output:
+  html_document:
+    number_sections: true
+    fig_caption: true
+    toc: true
+    fig_width: 7
+    fig_height: 4.5
+    theme: cosmo
+    highlight: tango
+    code_folding: hide
+---
+
+The following code assumes that the `renv` package has been installed in the global environment and that an R project has been created using `renv`. Moreover, the package versions have been updated and locked using `renv::snapshot()`.
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo=TRUE, error=FALSE)
+```
+
+
+# Introduction
+
+The goal of Part I is to analyze the dataset `diabetic data.csv`, which contains hospital records of diabetes patients and specifically investigates factors contributing to early readmissions within 30 days. Early readmissions serve as indicators of treatment quality and preventability, and they lead to additional costs for health insurance providers. Following data preprocessing, an exploratory data analysis (EDA) will be conducted, along with the development of initial machine learning models, first for binary classification, and finally for ternary classification in the last task. Additional background information is provided in the accompanying scientific paper (*paper.pdf*), which describes the dataset and its clinical context.
+
+
+# Task R0: Libraries, Reproducibility, and Core Helper Functions {.tabset .tabset-fade .tabset-pills}
+
+At this point, load all packages required for the subsequent tasks. Ensure that you load only those packages that are actually needed and used to maintain the efficiency and readability of the notebook. Additionally, ensure the reproducibility of the notebook. Define core helper functions as well; specifically, incorporate the functions `multiplot` and `get_binCI` from the SWoF template to generate multiple plots and compute binomial confidence intervals.
+
+**Solution:**
+
+## Reproducibility
+
+We set a seed to ensure reproducibility across all random processes (e.g., sampling, model training). Optionally, a `renv.lock` file can be provided upon request to allow others to recreate the exact package environment used in this project using `renv::restore()`.
+
+```{r reproducibility}
+# Set the seed for reproducibility
+seed <- 4321
+set.seed(seed)
+```
+
+## Load libraries
+
+We load a range of libraries for general data wrangling and general visualisation together with more specialised tools.
+
+```{r load_libraries, message = FALSE}
+# general visualisation
+library(ggplot2) # visualisation
+library(corrplot) # visualisation
+library(grid) # visualisation
+
+# general data manipulation
+library(dplyr) # data manipulation
+library(readr) # input/output
+library(data.table) # data manipulation
+library(tibble) # data wrangling
+library(tidyr) # data wrangling
+
+# modelling
+library(xgboost) # modelling
+library(caret) # modelling
+library(nnet) # modelling
+library(MLmetrics) # gini metric
+library(hstats) # interaction evaluation
+library(glmnet) # modelling
+library(mgcv) # modelling
+
+# Print version information about R, the OS and attached or loaded packages
+sessionInfo()
+```
+
+
+## Helper functions
+
+We use the *multiplot* function, courtesy of [R Cookbooks](http://www.cookbook-r.com/Graphs/Multiple_graphs_on_one_page_(ggplot2)/) to create multi-panel plots. We also make use of a brief helper function to compute binomial confidence intervals.
+
+```{r define_helper_functions}
+# Define multiple plot function
+#
+# ggplot objects can be passed in ..., or to plotlist (as a list of ggplot objects)
+# - cols:   Number of columns in layout
+# - layout: A matrix specifying the layout. If present, 'cols' is ignored.
+#
+# If the layout is something like matrix(c(1,2,3,3), nrow=2, byrow=TRUE),
+# then plot 1 will go in the upper left, 2 will go in the upper right, and
+# 3 will go all the way across the bottom.
+#
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+
+  # Make a list from the ... arguments and plotlist
+  plots <- c(list(...), plotlist)
+
+  numPlots = length(plots)
+
+  # If layout is NULL, then use 'cols' to determine layout
+  if (is.null(layout)) {
+    # Make the panel
+    # ncol: Number of columns of plots
+    # nrow: Number of rows needed, calculated from # of cols
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+  }
+
+ if (numPlots==1) {
+    print(plots[[1]])
+
+  } else {
+    # Set up the page
+    grid.newpage()
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Make each plot, in the correct location
+    for (i in 1:numPlots) {
+      # Get the i,j matrix positions of the regions that contain this subplot
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+                                      layout.pos.col = matchidx$col))
+    }
+  }
+}
+```
+
+```{r}
+# function to extract binomial confidence levels
+get_binCI <- function(x,n) as.list(setNames(binom.test(x,n)$conf.int, c("lwr", "upr")))
+```
+
+# Task R1: Data Preprocessing {.tabset .tabset-fade .tabset-pills}
+
+This task focuses on reading, filtering, preparing, and exporting data. The aim is to perform basic preprocessing steps to prepare the main dataset for use as the foundation for the subsequent tasks in Part I as well as Part II.
+
+## a) Reading data
+
+Load the file *diabetic data.csv* from the examination materials. Ensure that character strings are read as factors (data type: factor) and that missing values are not explicitly set using a `na.strings` statement. Output the number of rows and columns of the imported dataset, print the first ten entries, and verify the file is correctly imported. Briefly discuss one advantage and one disadvantage of the above approach to handling missing values in this dataset. Finally, check whether the dataset contains not only the values? but also other “real” missing values (NA).
+
+**Solution:**
+
+We use *data.table*'s `fread()` function to speed up data loading and set `stringsAsFactors = TRUE` to ensure that character strings are read as factors.
+
+```{r warning=FALSE, results=FALSE}
+# Load the data
+diabetic_data <- as.tibble(fread('../01_raw_data/diabetic_data.csv', # UPDATE this path if needed
+                                 stringsAsFactors = TRUE))
+
+# Number of rows and columns of the imported dataset
+dim(diabetic_data)
+```
+
+The dataset *diabetic data.csv* consists of 101766 rows and 50 columns in total. We output then the first ten entries of the dataset:
+
+```{r}
+# Print the first ten entries
+head(diabetic_data, 10)
+```
+
+Now, let's have an overview of the data sets using the *summary* tool.
+
+```{r}
+# Brief overview of the feature values
+summary(diabetic_data)
+```
+
+A comparison with the variable descriptions provided in *paper.pdf* confirms that all columns and their respective meanings are consistent. Notably, missing values are represented by the symbol `"?"`. Furthermore, all character-type features have been correctly imported as factors, as verified in the subsequent check. Therefore, the dataset has been successfully and accurately imported.
+
+```{r}
+# Check no character columns left as all are converted to factor
+all(!is.character(diabetic_data))
+```
+
+One advantage of not explicitly setting missing values using a `na.strings` statement is that all values are imported exactly as they appear in the raw dataset, including special codes such as `"?"`, `""`, `"NA"`, or `"NULL"`. This preserves the original context of missingness, which can be important when such codes carry specific meanings (e.g., `"?"` might indicate "not recorded", which is distinct from a standard `NA`). However, a disadvantage of this approach is that such values must be manually identified and, if necessary, converted to `NA` during subsequent data cleaning steps. This increases the complexity of the workflow and raises the risk of misclassification or oversight.
+
+Next, we check whether the dataset contains any "real" missing values (`NA`) by summing the total number of such values as follows.
+
+```{r}
+# Check for missing values
+sum(is.na(diabetic_data))
+```
+
+As shown in the summary and verified in the summation above, there is no “real” missing values (`NA`) in the dataset.
+
+## b) Filtering data
+
+Sort the data in ascending order, first by `patient_nbr`, then by `encounter_id`. Next, filter the
+dataset so that only the first hospitalization for each patient (= the lowest `encounter_id`) remains. Verify the correct execution of sorting and filtering by conducting an appropriate before-and-after comparison. Then, exclude all entries where the value of `discharge_disposition_id` is associated with death or hospice (values 11, 13, 14, 19, 20, 21). Remove the columns `encounter_id` and `patient_nbr`, as they are not required for further modeling. Create a frequency table of the `discharge_disposition_id` values and ensure that it matches the table in Appendix 2 of the exam. Finally, verify that the dataset now consists of 69,973 rows and 48 columns.
+
+**Solution:**
+
+```{r}
+# Sort the data by `patient_nbr` and then by `encounter_id`
+dat <- diabetic_data %>% arrange(patient_nbr, encounter_id)
+
+# Filter for each `patient_nbr` the first hospitalization (the first row)
+dat <- dat %>% group_by(patient_nbr) %>% 
+  filter(row_number() == 1) %>%
+  ungroup()
+```
+
+Compared to `r nrow(diabetic_data)` rows of the original dataset, the dataset has now `r length(unique(diabetic_data$patient_nbr))` rows which corresponds to the total number of patients. To verify the correct execution of sorting and filtering, we check that for each unique `patient_nbr` the lowest `encounter_id` is kept.
+
+```{r}
+# Create a table with the lowest `encounter_id` for each patient
+check <- dat %>%
+  group_by(patient_nbr) %>%
+  summarise(min_encounter_id = min(encounter_id), .groups = "drop")
+
+# Join the table with the dataset to verify
+comparison <- dat %>% inner_join(check, by = "patient_nbr")
+
+# Test whether the `encounter_id` selected is indeed the lowest
+stopifnot(all(comparison$encounter_id == comparison$min_encounter_id))
+
+# Remove intermediate variables after the test
+rm(check, comparison)
+```
+
+It can be observed that the test passes successfully. We then create a frequency table of the `discharge_disposition_id` values.
+
+```{r}
+# Exclude entries associated with death or hospice
+dat <- dat %>% 
+  filter(!(discharge_disposition_id %in% c(11, 13, 14, 19, 20, 21)))
+
+# Remove the column `enconter_id` and `patient_nbr`
+dat <- dat %>%
+  select(-encounter_id, -patient_nbr)
+
+# Create a frequency table of the `discharge_disposition_id`
+dat %>% group_by(discharge_disposition_id) %>% summarize(Count = n())
+```
+
+```{r}
+dim(dat)
+```
+We see that the frequency table matches the table in Appendix 2. Furthermore, the final dataset has 69,973 rows and 48 columns as claimed.
+
+## c) Analyzing Diagnosis data
+
+The dataset contains the primary diagnosis `diag_1` as well as two secondary diagnoses `diag_2` and `diag_3`, each in the nominal ICD9 coding. For each diagnosis variable, determine the number of unique diagnoses, the most frequent diagnosis, and the number of diagnoses that occur fewer than ten times. Briefly discuss two challenges each that this relatively large number of categories can pose for data visualization and modelling.
+
+**Solution:**
+
+```{r}
+# Calculate the number of unique diagnoses
+summary <- summary(dat)
+print("Number of unique diagnoses by diagnosis variable:")
+sapply(dat[, c("diag_1", "diag_2", "diag_3")], n_distinct)
+```
+
+```{r}
+# Function getting the mode of a categorical variable
+get_mode <- function(cat_var) {
+  tab <- table(cat_var)
+  names(tab[which.max(tab)])
+}
+
+print("The most frequent diagnosis by diagnosis variable:")
+sapply(dat[, c("diag_1", "diag_2", "diag_3")], get_mode)
+```
+
+```{r}
+# Function calculating the number of categorical values fewer than a 'threshold'
+count_values_below_threshold <- function(cat_var, threshold = 10) {
+  sum(table(cat_var) < threshold)
+}
+
+print("Number of diagnoses that occur fewer than ten times:")
+sapply(dat[, c("diag_1", "diag_2", "diag_3")], count_values_below_threshold)
+```
+Because ICD9 codes are very numerous and often sparsely distributed, we face real challenges:
+
+**Data visualization Challenges**:
+
+1. Overcrowded plots due to numerous unique categories: 
+    * When there are many unique categories (e.g., hundreds or thousands of ICD9 codes), visualizations such as bar plots or pie charts can become cluttered and difficult to interpret, with individual categories blurring together.
+    * **Problem**: It becomes nearly impossible to discern meaningful patterns or extract key insights without grouping or filtering the categories.
+
+2. Difficulty in visualizing frequency distribution in imbalanced data:
+    * The distribution of diagnoses can be highly imbalanced, with a few common conditions occurring frequently and many other conditions appearing very infrequently.
+    * **Problem**: This imbalance can distort the appearance of visualizations, making it hard to interpret less frequent conditions.
+
+Modeling Challenges:
+
+1. High dimensionality, leading to overfitting and model inefficiency:
+    * If each unique code is one-hot encoded (or represented in some other way), the feature space becomes excessively large, and many models struggle to handle very sparse, high-dimensional data.
+    * **Problem**: This increases the risk of overfitting, and the training time and memory consumption grow significantly.
+
+2. Rare categories causing poor model performance:
+    * Many diagnosis codes may have only a few occurrences, resulting in sparse data.
+    * **Problem**: Models trained on sparse data may overfit, fail to generalize well, or struggle to identify meaningful patterns.
+
+Solutions to address these challenges (Some will be implemented in the following tasks):
+
+- Visualization: 
+  * Group infrequent codes into an "Other" category or cluster diagnoses hierarchically.
+  * Apply log scaling or transform the frequency distribution to better highlight rare categories without losing the detail of the more common ones.
+
+- Modeling:
+  * Use dimensionality reduction techniques (e.g., PCA or autoencoders) after encoding the data.
+  * Leverage embeddings (e.g., learnable embeddings for diagnosis codes and other categorical features).
+  * Group diagnoses into broader clinical categories (e.g., by ICD9 chapter) to reduce dimensionality.
+
+## d) Preparing Diagnosis Reference Data
+
+Load the two files `CCS_mapping_ICD9.csv` and `CCS_categories_ICD9.csv` from the examination materials and perform an appropriate left join using the feature `category_id` to link the information. Next, sort the resulting data by the ICD9-coded feature `code` and export the result as a CSV file `icd9_data.csv`. Create a frequency table for the diagnosis group `group` and ensure it matches the table in Appendix 2 of the exam.
+
+**Solution:**
+
+```{r}
+# Read mapping of ICD-9 diagnosis codes to CCS categories
+CCS_mapping_ICD9 <- as.tibble(read.csv2('../01_raw_data/CCS_mapping_ICD9.csv', 
+                                        stringsAsFactors=TRUE))
+# Assertion: Check that no duplicate codes exists
+stopifnot(!any(duplicated(CCS_mapping_ICD9$code)))
+
+# Read information on CCS categories
+CCS_categories_ICD9 <- as.tibble(read.csv2('../01_raw_data/CCS_categories_ICD9.csv', 
+                                           stringsAsFactors=TRUE)) %>%
+  select(-X)
+# Assertion: Check that no duplicate codes exists
+stopifnot(!any(duplicated(CCS_categories_ICD9$category_id)))
+```
+
+```{r}
+# Join together the diagnosis reference and group data
+icd9_data <- CCS_mapping_ICD9 %>%
+  left_join(CCS_categories_ICD9, by = "category_id")
+
+# Sort the diagnosis data by the ICD9-coded feature `code`
+icd9_data <- icd9_data %>% arrange(code) 
+
+# Export the result
+icd9_data %>% write_csv("../02_tidy_data/icd9_data.csv")
+
+# Create a frequency table for the diagnosis group `group`
+icd9_data %>% group_by(group) %>% summarize(Count = n())
+```
+
+The resulting frequency table matches indeed the table in Appendix 2.
+
+## e) Assigning Diagnosis Groups
+
+First, create a subset `icd9` from the prepared diagnosis group data containing only the columns `code` and `group`. Then, remove all periods (’.’) from the values of the diagnosis features `diag_1`, `diag_2`, and `diag_3` in the main dataset. For each of the three diagnosis features, perform a left join with the created dataset `icd9` so that the corresponding diagnosis group is added in a new column (`group_diag_1`, `group_diag_2`, and `group_diag_3` ). Note that the left join may result in missing values for some diagnoses. Replace these missing values with the placeholder value *Other*. Ensure that the groups are correctly assigned by checking two example rows. Additionally, ensure that all features whose names end with `_id` are of data type *factor*.
+
+**Solution:**
+
+```{r}
+# Create a subset containing only diagnosis group data
+icd9 <- icd9_data %>% select(code, group)
+
+# Remove all periods (’.’) from the values of the diagnosis features
+dat <- dat %>%
+  mutate(across(starts_with("diag_"), ~ gsub(pattern = "\\.", replacement = "", .)))
+
+# Assign diagnosis groups to each diagnosis feature
+dat <- dat %>%
+  left_join(icd9, by = c("diag_1" = "code")) %>%
+  rename(group_diag_1 = group) %>%
+  left_join(icd9, by = c("diag_2" = "code")) %>%
+  rename(group_diag_2 = group) %>%
+  left_join(icd9, by = c("diag_3" = "code")) %>%
+  rename(group_diag_3 = group) %>%
+  # Convert the diagnosis features back to factors from characters during joins
+  mutate(across(where(is.character), as.factor))
+
+# `replace_na` from the package `tidyr`
+dat <- dat %>%
+  mutate(across(starts_with("group_diag_"), ~ replace_na(., "Other")))
+```
+
+Next we ensure that the groups are correctly assigned by randomly sampling two rows and comparing the groups assigned with those expected from the lookup table `icd9`.
+
+```{r}
+# Assertion helper for checking whether diagnosis groups are correctly assigned
+assert_groups <- function(row_ids) {
+  rows <- dat %>% filter(row_number() %in% row_ids)
+  
+  # Actual assigned groups in the dataset
+  actual <- rows %>% select(starts_with("group_diag_"))
+  
+  # Helper function to assign a group based on ICD9 code
+  assign_group <- function(icd9_code) {
+    icd9_code <- as.character(icd9_code)
+    if (icd9_code %in% icd9$code) {
+      icd9 %>% filter(code == icd9_code) %>% pull(group)
+    } else {
+      "Other"
+    }
+  }
+  
+  # Compute the expected groups for each diagnosis code
+  expected <- rows %>%
+    rowwise() %>%
+    transmute(across(starts_with("diag_"), assign_group, .names = "group_{.col}")) %>%
+    ungroup()
+  
+  # Assertion: Check if actual group assignments match expected ones
+  stopifnot(identical(actual, expected))
+}
+
+# Sample two rows from the dataset for validation
+assert_groups(sample(seq_len(nrow(dat)), size = 2))
+```
+
+The test passed as desired. We check now that all features have the data types desired.
+
+```{r}
+# Ensure all features whose names end with _id are of data type `factor`
+dat <- dat %>%
+  mutate(across(ends_with("_id"), as.factor))
+
+# Check and output the data types of each column
+sapply(dat, class)
+```
+
+We observe that all categorical variables, including those ending in "_id", are now factors, and all variables representing counts are of numeric (integer) type.
+
+## f) Cleaning Categorical Features: 
+
+For each feature of data type factor, except for `diag_1`, `diag_2`, and `diag_3`, perform the following steps: Check if a feature value occurs in the dataset fewer than ten times. If so, replace it with the most frequent value for that feature. Then, create an overview for each affected feature, listing the feature name, the most frequent value, and the values that were replaced. 
+
+Finally, analyze the impact of this cleaning process on the application of machine learning models, especially in terms of model stability, performance, and executability. Discuss two relevant effects for each aspect (and, if needed, support your argument using logistic regression and insights from Task R3).
+
+**Solution:**
+
+```{r}
+# Helper function cleaning categorical features 'cat'
+clean_categorical_feature <- function(cat, cat_name) {
+  # Create a frequency table and record values fewer than 10 times
+  tab <- table(cat)
+  rare_levels <- names(tab[tab < 10])
+  
+  # Do nothing if all values occur at least ten times
+  if (length(rare_levels) == 0) return(NULL)
+  
+  # Record the most frequent value
+  most_frequent <- names(which.max(tab))
+  
+  # Replace rare values with the most frequent one in a `newCol`
+  new_col <- cat
+  new_col[new_col %in% rare_levels] <- most_frequent
+  
+  list(
+    new_col = new_col,
+    summary = tibble(
+      categorical_feature = cat_name,
+      most_frequent_value = most_frequent,
+      values_replaced = paste(rare_levels, collapse = "; ")
+    )
+  )
+}
+
+# Select categorical features except diagnosis codes
+list_factors <- dat %>%
+  select(where(is.factor), -starts_with("diag_"))
+
+# Process the selected categorical features
+list_factors_updated <- Map(clean_categorical_feature, list_factors, names(list_factors))
+
+# Update the diabetic data with modified columns
+for (name in names(list_factors_updated)) {
+  if (!is.null(list_factors_updated[[name]])) {
+    dat[[name]] <- list_factors_updated[[name]]$new_col
+  }
+}
+
+# Create an overview of cleaned categorical features
+bind_rows(lapply(list_factors_updated, function(x) x$summary))
+```
+
+<u><b>Impact on Machine Learning Models</b></u>
+
+(1) Model stability:
+    * Impact 1: **Reduced variability in feature distribution**
+    
+      Replacing rare values with the most frequent category reduces variability in the feature’s distribution. This can enhance model stability, as categorical features become more consistent, and the model does not need to account for numerous outliers or low-frequency categories. It also helps mitigate overfitting, which may occur when the model learns from noise introduced by rare categories. For example, in logistic regression, categorical variables with many rare levels can lead to unstable coefficient estimates (e.g., large standard errors). Consolidating these rare levels can result in more reliable parameter estimates.
+    * Impact 2: **More consistent predictions**
+
+      With fewer levels to handle, the model tends to produce more consistent predictions across different datasets or cross-validation folds, as the variance introduced by rare categories is reduced.
+
+(2) Model Performance:
+    * Impact 1: **Improved performance in some cases**
+    
+      Rare categories can introduce noise, negatively affecting model performance. Replacing them with the most frequent category allows the model to focus on dominant patterns, which may improve performance, particularly in large datasets where the most frequent categories capture meaningful structure.
+    * Impact 2: **Potential loss of information**
+    
+      However, replacing rare values can lead to a loss of information and reduced feature diversity. If a rare category carries predictive value (e.g., a rare but clinically significant diagnosis code), its removal or consolidation may impair the model’s ability to detect subtle patterns or distinguish between outcomes. For instance, in the feature importance plot from the XGBoost model in Task R3, we observe that the individual diagnosis code variables `diag_x` are all significantly more important than their grouped counterparts, highlighting the potential value of preserving rare but informative categories.
+
+(3) Model executability:
+    * Impact 1: **Faster model training**
+  
+      Reducing the number of categories in factor variables decreases model complexity and speeds up training, particularly in models like logistic regression that must compute coefficients for each level.
+    * Impact 2: **Simplified feature engineering**
+
+      Consolidating rare categories simplifies the feature engineering pipeline, making it more practical and efficient in production environments where data processing speed and reproducibility are important.
+
+## g) Creating Datasets for Binary and Ternary Classification
+
+Two datasets should be created for later tasks: A dataset `diabetic_data_ter` for the ternary classification of hospital readmissions and a dataset `diabetic_data_bin` for the binary classification of hospital readmissions.
+
+– Dataset `diabetic_data_ter`: Replace the feature readmitted with a new feature TARGET of data type * factor*. Also, remove any levels from factor features that no longer occur after the previous filtering steps. Visualize the distribution of the ternary target variable TARGET with a pie chart.
+
+– Dataset `diabetic_data_bin`: Based on the dataset `diabetic_data_ter`, filter out all rows where TARGET has the value >30. Then, modify the feature TARGET while keeping the data type factor as follows: Assign TARGET the value 1 if the patient was readmitted within 30 days (former TARGET value: <30), and assign the value 0 otherwise. Also, remove any levels from factor features that no longer occur after the previous filtering steps. Visualize the distribution of the binary target variable TARGET with a pie chart. Briefly discuss the imbalance of this target variable and its potential impact on later modelling. Display the first ten rows of the preprocessed dataset and then export the entire dataset as a CSV file named `diabetic_data_bin.csv`.
+
+**Solution:**
+
+```{r}
+# Rename the feature `readmitted` as 'TARGET'
+diabetic_data_ter <- dat %>%
+  rename(TARGET = readmitted)
+
+# Order those categorical features that are ordinal
+diabetic_data_ter <- diabetic_data_ter %>%
+  mutate(age = ordered(age), 
+         weight = ordered(weight, 
+                          levels = c("[0-25)", "[25-50)", "[50-75)", "[75-100)", "[100-125)", "[125-150)", "[150-175)", "[175-200)", ">200", "?")), 
+         max_glu_serum = ordered(max_glu_serum, 
+                                 levels = c("None", "Norm", ">200", ">300")), 
+         A1Cresult = ordered(A1Cresult, 
+                             levels = c("None", "Norm", ">7", ">8")), 
+         TARGET = ordered(TARGET, levels = c("NO", "<30", ">30")))
+
+drug_cols <- c("metformin", "repaglinide", "nateglinide", "chlorpropamide", "glimepiride", 
+               "acetohexamide", "glipizide", "glyburide", "tolbutamide", "pioglitazone", 
+               "rosiglitazone", "acarbose", "miglitol", "troglitazone", "tolazamide", 
+               "examide", "citoglipton", "insulin", "glyburide-metformin", 
+               "glipizide-metformin", "glimepiride-pioglitazone", 
+               "metformin-rosiglitazone", "metformin-pioglitazone")
+diabetic_data_ter <- diabetic_data_ter %>%
+  mutate(across(all_of(drug_cols), ~ ordered(.x, levels = c("No", "Down", "Steady", "Up"))))
+
+# Remove any levels from factor features that no longer occur
+diabetic_data_ter <- droplevels(diabetic_data_ter)
+```
+
+Next we plot the distribution of the target variable `TARGET` via a pie chart.
+
+```{r}
+# Plot a pie chart given a dataset 'dat' and name of the variable 'cat_var'
+plot_pie_chart <- function(dat, cat_var) {
+  # Count occurrences per TARGET
+  freqTable <- dat %>%
+    count(!!sym(cat_var)) %>%
+    mutate(percentage = n / sum(n) * 100)
+
+  # Plot a pie chart
+  ggplot(freqTable, aes(x = "", y = n, fill = !!sym(cat_var))) +
+    geom_col(width = 1, color = "white") +
+    coord_polar(theta = "y") +  # Turn a bar chart into a pie chart
+    labs(title = paste0("Distribution of ", cat_var), y = NULL, x = NULL, fill = cat_var) +
+    theme_void() +  # Remove axes and grids
+    geom_text(aes(label = paste0(round(percentage), "%")),
+              position = position_stack(vjust = 0.5)) + # Place each label in the middle
+    theme(plot.title = element_text(hjust = 0.5, vjust = -2, size = 14))  # Centre the title
+}
+```
+
+```{r split=FALSE, fig.align='center', warning=FALSE, fig.cap="Fig. 1", out.width="100%"}
+# Plot the distribution of the target variable TARGET
+plot_pie_chart(diabetic_data_ter, "TARGET")
+```
+
+Finally, we create a dataset, `diabetic_data_bin`, for binary classification of hospital readmissions and plot the distribution of the binary `TARGET` variable using a pie chart.
+
+```{r}
+# FIlter out the TARGET >30
+diabetic_data_bin <- diabetic_data_ter %>%
+  filter(TARGET != ">30")
+
+# Encode the TARGET as 1 or 0
+diabetic_data_bin <- diabetic_data_bin %>%
+  mutate(TARGET = case_when(TARGET == "<30" ~ "1", 
+                            TRUE ~ "0"), 
+         TARGET = as.factor(TARGET))
+
+# Remove any levels from factor features that no longer occur
+diabetic_data_bin <- droplevels(diabetic_data_bin)
+```
+
+```{r split=FALSE, fig.align='center', warning=FALSE, fig.cap="Fig. 2", out.width="100%"}
+# Plot the distribution of the binary target variable TARGET
+plot_pie_chart(diabetic_data_bin, "TARGET")
+```
+
+The imbalance in the target variable, with 87% of the data belonging to class 0 and 13% to class 1, poses several challenges for modeling:
+
+* **Model bias**: Models may become biased toward predicting the majority class (0) due to its dominance in the data. This bias can lead to poor performance in identifying the minority class (1), especially when using metrics focused on the minority class, such as precision, recall, and F1-score.
+
+* **Accuracy as a misleading metric**: In imbalanced datasets, high accuracy can be misleading. A model that always predicts the majority class (0) will achieve high accuracy (87%) but will fail to correctly predict the minority class (1), leading to a false sense of good performance.
+
+To mitigate the impact of class imbalance during modeling in R, we can apply several techniques:
+
+* **Resampling**: Use oversampling (e.g., SMOTE) or undersampling methods to balance the class distribution in the training data. This will be carried out in Part II.
+
+* **Class weighting**: Assign higher weights to the minority class, which penalizes the model more for misclassifying the minority class.
+
+* **Use specific evaluation metrics**: Assess performance using metrics like precision, recall, F1-score, or ROC-AUC, which provide a clearer picture of the model’s ability to handle imbalanced data.
+
+* **Use ensemble methods**: Algorithms like Random Forest or XGBoost tend to be more robust to class imbalance. These models aggregate multiple trees, which may help capture patterns in the minority class more effectively.
+
+Finally, we display the first ten rows of the preprocessed dataset and export it to a CSV file for later use.
+
+```{r}
+# Display the first ten rows of `diabetic_data_bin`
+head(diabetic_data_bin, 10)
+```
+
+```{r}
+# Export the entire dataset as a CSV file
+diabetic_data_bin %>% write_csv("../02_tidy_data/diabetic_data_bin.csv")
+
+# Remove objects that are no longer needed for the subsequent analysis
+rm(diabetic_data, dat, CCS_categories_ICD9, CCS_mapping_ICD9, icd9_data, icd9)
+```
+
+# Task R2: Exploratory Data Analysis and Visualization
+
+In this task, code snippets from the SWoF template must be extracted and modified in certain places. The objective of these modifications is to ensure the code runs with minimal adjustments, using the dataset `diabetic_data_bin`, which was created at the end of Task R1, as input. At the beginning of each relevant subtask, the corresponding section of the SWoF template is indicated in bold.
+
+Note: *For all visualizations created in this task, ensure clarity, consistency, and readability. Points will be deducted for failing to meet this requirement.*
+
+## a) 3 Overview
+
+Apply the functions summary and glimpse to the dataset `diabetic_data_bin` and briefly discuss the results.
+
+**Solution:**
+
+As a first step let's have an overview of the data sets using the *summary* and *glimpse* tools.
+
+```{r}
+summary(diabetic_data_bin)
+```
+
+```{r}
+glimpse(diabetic_data_bin)
+```
+
+We find the following:
+
+- The dataset contains a large number of features, with a total of 47,751 rows and 51 variables, including the *id* and *target* columns.
+
+- As outlined in the data description in *paper.pdf*, most variables are nominal, with the exception of 8 integer variables. These nominal variables are represented as factors in the dataset.
+
+- Key variables include:
+
+  * **Demographics**: `race`, `gender`, `age`, `weight`, with some missing or unknown values (?), especially for `weight`.
+  * **Hospitalization**: `admission_type_id`, `discharge_disposition_id`, `admission_source_id`, `time_in_hospital`, with most stays being short, as indicated by a median of 3 days.
+  * **Medical Information**: `medical_specialty` with nearly half of the values being unknown (`?`), along with  `number_diagnoses`, as well as `diag_x`, `diag_2`, `diag_3`, which contain detailed but sparse data.
+  * **Lab and Medications**: Features such as `num_lab_procedures` and `num_medications`, which exhibit a skewed distribution with a long tail and high maximum values.
+  * **Outcomes**: Variables such as `change`, `diabetesMed`, and the target variable `TARGET` (indicating whether the patient was readmitted or not).
+
+## b) 4 Individual feature visualisations
+
+In the SWoF template, the features in the dataset are classified into different groups (Sections 4.1 to 4.9). Define a meaningful grouping of the features in the dataset `diabetic_data_bin` (excluding `diag_1`, `diag_2`, `diag_3`) into four to seven groups and justify your choice. For
+each group, create histograms and kernel density estimator plots for the respective features, ensuring they resemble those in Sections 4.1 to 4.9 of the template. Use the function `multiplot` and apply a logarithmic *y*-axis where appropriate. Discuss the key insights derived from the visualizations, particularly in terms of their relevance for predicting the target variable TARGET.
+
+**Solution:**
+
+We begin our exploration with distribution plots for the various features. To make this visualization more comprehensive, we will organize the features into specific groups and create layouts for each. For readability, we will divide each group into multiple parts:
+
+* **Demographic features**: `race`, `gender`, `age`, `weight`;
+* **Administrative and provider features**: `admission_type_id`, `discharge_disposition_id`, `admission_source_id`, `payer_code`, `medical_specialty`;
+* **Patient utillisation history**: `time_in_hospital`, `num_lab_procedures`, `num_procedures`, `num_medications`, `number_outpatient`, `number_emergency`, `number_inpatient`, `number_diagnoses`, all defined in terms of integers;
+* **Lab test results**: `max_glu_serum`, `A1Cresult`;
+* **Medication results**: 
+  - **Overall**: `change`, `diabetesMed` (each with two possible values);
+  - **Unary**: `acetohexamide`, `troglitazone`, `examide`, `citoglipton`, `glipizide-metformin`, `glimepiride-pioglitazone`, `metformin-rosiglitazone`, `metformin-pioglitazone` (each with only one possible value);
+  - **Binary**: `chlorpropamide`, `tolbutamide`, `miglitol`, `tolazamide`, `glyburide-metformin` (each with two possible values);
+  - **The rest**: `metformin`, `repaglinide`, `nateglinide`, `glimepiride`, `glipizide`, `glyburide`, `pioglitazone`, `rosiglitazone`, `acarbose`, `insulin` (each with at least three possible values);
+* **Diagnosis**: `group_diag_1`, `group_diag_2`, `group_diag_3`;
+* **Target variable**: `TARGET`.
+
+These plots will be one of the pillars of our analysis. They might not be particularly exciting in themselves, but whenever we find an interesting effect in one of the variables we can come back here and examine their distribution. It's always an advantage to start with a clear view of the parameter space.
+
+```{r}
+# Function to plot a bar chart given a dataset 'dat' 
+# and name of the variable 'cat_var'
+plot_bar_chart <- function(dat, cat_var) {
+  dat %>%
+    # Reorder the feature by count
+    ggplot(aes(x = !!sym(cat_var), fill = !!sym(cat_var))) + 
+    geom_bar() + 
+    theme(legend.position = "none", 
+          axis.text.x = element_text(angle = 45, size = 9, hjust = 1)) +
+    labs(x = cat_var)
+}
+
+# Function to adjust axes and optionally apply a log scale to the y-axis
+adjust_axis <- function(ggplot, log_y = TRUE, size_axis_title = 12, size_axis_label = 10) {
+  ggplot <- ggplot + 
+    theme(
+      axis.title = element_text(size = size_axis_title), 
+      axis.text.x = element_text(size = size_axis_label))
+  
+  if (log_y) {
+    ggplot <- ggplot + scale_y_log10()  # Apply logarithmic scale to the y-axis
+  }
+  
+  return(ggplot)
+}
+```
+
+### Demographic features
+
+```{r  split=FALSE, fig.align="center", fig.height=8, warning=FALSE, fig.cap="Fig. 3", out.width="100%"}
+p1 <- adjust_axis(plot_bar_chart(diabetic_data_bin, "race"))
+p2 <- plot_bar_chart(diabetic_data_bin, "gender")
+p3 <- adjust_axis(plot_bar_chart(diabetic_data_bin, "age"))
+p4 <- adjust_axis(plot_bar_chart(diabetic_data_bin, "weight"))
+
+layout <- matrix(1:4, 2, 2, byrow = TRUE)
+multiplot(p1, p2, p3, p4, layout = layout)
+```
+
+Key insights from the visualization of these features are:
+
+1. `race`: Caucasians dominate the dataset, followed by African Americans, while Asians and Hispanics are relatively fewer, though still sufficiently represented. There is also a significant proportion of missing race data (`?`). Race may be an important predictor if readmission patterns differ across ethnic groups due to disparities in health outcomes or access to care.
+
+2. `gender`: There are slightly more females than males, but overall the gender distribution is fairly balanced. This balance is a positive aspect, as it provides a good foundation for evaluating gender as a potential predictor.
+ 
+3. `age`: Most patients are older, particularly within the 50–80 age range, while very few are under 30 or over 90. Age is likely to be a strong predictor, especially if readmission rates correlate significantly with patient age.
+
+4. `weight`: There is a large proportion of missing data (`?`) for weight, namely approximately half the patients. While weight could be a meaningful variable due to its relationship with diabetes-related complications, the high rate of missingness may limit its predictive power.
+
+### Administrative and provider features
+
+```{r  split=FALSE, fig.align="center", fig.height=9, warning=FALSE, fig.cap="Fig. 4", out.width="100%"}
+p1 <- adjust_axis(plot_bar_chart(diabetic_data_bin, "admission_type_id"))
+p2 <- adjust_axis(plot_bar_chart(diabetic_data_bin, "discharge_disposition_id"))
+p3 <- adjust_axis(plot_bar_chart(diabetic_data_bin, "admission_source_id"))
+p4 <- adjust_axis(plot_bar_chart(diabetic_data_bin, "payer_code"))
+p5 <- plot_bar_chart(diabetic_data_bin, "medical_specialty") + 
+  scale_y_log10() + 
+  theme(axis.title = element_text(size = 12))
+
+layout <- matrix(c(rep(1:2, 2), rep(3:4, 2), rep(5, 6)), 7, 2, byrow = TRUE)
+multiplot(p1, p2, p3, p4, p5, layout = layout)
+```
+
+Key insights from the visualization of these features are:
+
+1. `admission_type_id`: Except for types `7` and `8`, all other categories have sufficient representation. This variable may serve as a useful predictor for readmission rates, especially if certain admission types are closely associated with the TARGET.
+
+2. `discharge_disposition_id`: Apart from a few categories with very few occurrences, the overall distribution is relatively balanced. This makes it a potentially valuable predictor, particularly if discharge outcomes are linked to readmission likelihood.
+
+3. `admission_source_id`: Compared to `admission_type_id`, with which it should have some correlation, this feature has more categories with low frequency. This sparsity may reduce its predictive utility.
+
+4. `payer_code`:  Despite a large number of missing values (`?`), this feature might still provide useful insight. It could be associated with care quality, socioeconomic status, and follow-up likelihood, all of which can influence readmission risk.
+
+5. `medical_specialty`: This variable is highly skewed, with many missing values (`?`) and several rare categories. Nevertheless, it may be a strong predictor since the type of specialist involved can significantly impact patient outcomes. If so, careful preprocessing, especially to handle missing and sparse categories, would be necessary.
+
+### Patient utillisation history part 1
+
+```{r}
+# Plot a pie chart given a dataset 'dat' and name of the variable 'cont_var'
+plot_histogram <- function(dat, cont_var, binwidth) {
+  dat %>%
+    ggplot(aes(x = !!sym(cont_var))) + 
+    geom_histogram(fill = "blue", alpha = 0.5, binwidth = binwidth) +
+    scale_y_log10() +  # With logarithmic y-axes
+    theme(legend.position = "none")
+}
+
+# Create KDE plot given a dataset 'dat' and name of the variable 'cont_var'
+plot_KDE <- function(dat, cont_var) {
+  dat %>%
+    ggplot(aes(x = !!sym(cont_var))) + 
+    geom_density(fill = "blue", alpha = 0.5) +
+    theme(legend.position = "none")
+}
+```
+
+```{r  split=FALSE, fig.align='center', fig.height=8, warning=FALSE, fig.cap="Fig. 5", out.width="100%"}
+p1 <- plot_histogram(diabetic_data_bin, "time_in_hospital", binwidth = 1)
+p2 <- plot_KDE(diabetic_data_bin, "time_in_hospital")
+p3 <- plot_histogram(diabetic_data_bin, "num_lab_procedures", binwidth = 1)
+p4 <- plot_KDE(diabetic_data_bin, "num_lab_procedures")
+p5 <- plot_histogram(diabetic_data_bin, "num_procedures", binwidth = 1)
+p6 <- plot_KDE(diabetic_data_bin, "num_procedures")
+p7 <- plot_histogram(diabetic_data_bin, "num_medications", binwidth = 1)
+p8 <- plot_KDE(diabetic_data_bin, "num_medications")
+
+layout <- matrix(1:8, 4, 2, byrow=TRUE)
+multiplot(p1, p2, p3, p4, p5, p6, p7, p8, layout=layout)
+```
+
+Key insights:
+
+1. `time_in_hospital`:  The distribution is slightly right-skewed but relatively uniform overall. Longer hospital stays often indicate more severe conditions, which may increase the risk of readmission. However, in some cases, extended stays may fully address the underlying issues, potentially reducing the risk of return.
+
+2. `num_lab_procedures`: Most patients undergo between 40–60 lab tests, with a right-skewed distribution that extends up to over 100 tests. A high number of lab procedures often signals complex or closely monitored cases, making this feature a potentially strong predictor of readmission risk.
+
+3. `num_procedures`: This variable, representing the number of procedures performed, shows a fairly balanced distribution. Its direct relevance to readmission is not immediately clear, and further analysis is needed to evaluate its predictive value.
+
+4. `num_medications`: The feature exhibits a right-skewed distribution with a long tail reaching up to 80 medications. A high medication count may reflect complex health conditions or polypharmacy, both of which are associated with adverse outcomes and an increased likelihood of readmission.
+
+### Patient utillisation history part 2
+
+```{r  split=FALSE, fig.align='center', fig.height=8, warning=FALSE, fig.cap="Fig. 6", out.width="100%"}
+p9 <- plot_histogram(diabetic_data_bin, "number_outpatient", binwidth = 1)
+p10 <- plot_KDE(diabetic_data_bin, "number_outpatient")
+p11 <- plot_histogram(diabetic_data_bin, "number_emergency", binwidth = 1)
+p12 <- plot_KDE(diabetic_data_bin, "number_emergency")
+p13 <- plot_histogram(diabetic_data_bin, "number_inpatient", binwidth = 1)
+p14 <- plot_KDE(diabetic_data_bin, "number_inpatient")
+p15 <- plot_histogram(diabetic_data_bin, "number_diagnoses", binwidth = 1)
+p16 <- plot_KDE(diabetic_data_bin, "number_diagnoses")
+
+layout <- matrix(1:8, 4, 2, byrow = TRUE)
+multiplot(p9, p10, p11, p12, p13, p14, p15, p16, layout=layout)
+```
+
+Key insights:
+
+- `number_outpatient` and `number_emergency` are both highly right-skewed, with the majority of patients having 0 or 1 such visits. Only a very small number of patients have more than 30 outpatient or emergency encounters. This strong imbalance suggests that these features may carry limited predictive power for readmission, especially without transformation or binning.
+
+- `number_inpatient`, while also right-skewed, represents prior hospitalizations, which are well-known to be among the strongest predictors of future hospitalizations. This makes it a particularly valuable feature in modeling readmission risk.
+
+- `number_diagnoses` is more evenly distributed, with most values ranging between 1 and 9. There is a noticeable drop-off beyond 9, likely due to system or reporting limits. Since a higher number of diagnoses typically reflects greater comorbidity, this feature is likely to be an important predictor of readmission.
+
+### Lab test results
+
+```{r  split=FALSE, fig.align="center", warning=FALSE, fig.cap="Fig. 7", out.width="100%"}
+p1 <- adjust_axis(plot_bar_chart(diabetic_data_bin, "max_glu_serum"))
+p2 <- adjust_axis(plot_bar_chart(diabetic_data_bin, "A1Cresult"))
+
+layout <- matrix(1:2, 1, 2, byrow = TRUE)
+multiplot(p1, p2, layout = layout)
+```
+
+Key insights:
+
+- The majority of records show "None" for both `max_glu_serum` and `A1Cresult`, indicating that these tests were not performed or results were not recorded for most patients.
+
+- However, a non-negligible portion of the data includes elevated glucose levels (e.g., `>200`, `>300`) and high A1C values (e.g., `>7`, `>8`).
+
+- Elevated glucose and A1C values are strong clinical indicators that may trigger immediate adjustments in medication or care plans, which could lead to closer monitoring and potentially lower readmission rates if managed appropriately.
+
+### Medication results - overall
+
+```{r  split=FALSE, fig.align="center", warning=FALSE, fig.cap="Fig. 8", out.width="100%"}
+p1 <- plot_bar_chart(diabetic_data_bin, "change")
+p2 <- plot_bar_chart(diabetic_data_bin, "diabetesMed")
+
+layout <- matrix(1:2, 1, 2, byrow = TRUE)
+multiplot(p1, p2, layout = layout)
+```
+
+Key insights:
+
+- A significant number of patients have "No" recorded for the `change` variable, indicating no adjustment to their medication regimen during the encounter.
+
+- The majority of patients are on some form of diabetes medication (`diabetesMed` == "Yes"), suggesting that pharmacological treatment is common in this population.
+
+These two features, `change` and `diabetesMed`, can reflect different aspects of disease management. A medication change may signal a worsening or improvement in the patient’s condition, prompting clinicians to adjust treatment. In contrast, patients on medication but with no changes could represent either stable management or possibly neglected care if adjustments were needed but not made. Thus, while these features are potentially informative, they require clinical context to interpret their implications for readmission risk accurately.
+
+### Medication results - unary
+
+```{r  split=FALSE, fig.align='center', fig.height=6, warning=FALSE, fig.cap="Fig. 9", out.width="100%"}
+p1 <- plot_bar_chart(diabetic_data_bin, "acetohexamide")
+p2 <- plot_bar_chart(diabetic_data_bin, "troglitazone")
+p3 <- plot_bar_chart(diabetic_data_bin, "examide")
+p4 <- plot_bar_chart(diabetic_data_bin, "citoglipton")
+p5 <- plot_bar_chart(diabetic_data_bin, "glipizide-metformin")
+p6 <- plot_bar_chart(diabetic_data_bin, "glimepiride-pioglitazone")
+p7 <- plot_bar_chart(diabetic_data_bin, "metformin-rosiglitazone")
+p8 <- plot_bar_chart(diabetic_data_bin, "metformin-pioglitazone")
+
+layout <- matrix(1:8, 2, 4, byrow = TRUE)
+multiplot(p1, p2, p3, p4, p5, p6, p7, p8, layout = layout)
+```
+
+These diabetes medications features contain only a single unique value across all records. These features are deterministic and carry no variance, making them irrelevant for predictive modeling.
+
+### Medication results - binary
+
+```{r  split=FALSE, fig.align='center', fig.height=6, warning=FALSE, fig.cap="Fig. 10", out.width="100%"}
+p1 <- plot_bar_chart(diabetic_data_bin, "chlorpropamide") + scale_y_log10()
+p2 <- plot_bar_chart(diabetic_data_bin, "tolbutamide") + scale_y_log10()
+p3 <- plot_bar_chart(diabetic_data_bin, "miglitol") + scale_y_log10()
+p4 <- plot_bar_chart(diabetic_data_bin, "tolazamide") + scale_y_log10()
+p5 <- plot_bar_chart(diabetic_data_bin, "glyburide-metformin") + scale_y_log10()
+
+layout <- matrix(1:5, 1, 5, byrow = TRUE)
+multiplot(p1, p2, p3, p4, p5, layout = layout)
+```
+
+The diabetic medications `chlorpropamide`, `tolbutamide`, `miglitol`, `tolazamide`, and `glyburide-metformin` show highly imbalanced distributions, with the vast majority of entries indicating `No` usage. These medications are rarely prescribed in the dataset, which leads to very low variability and minimal exposure.
+
+As a result, they are unlikely to serve as reliable or meaningful predictors in the readmission classification task. Their inclusion could even introduce noise or increase the risk of overfitting in certain models, especially those sensitive to rare categories.
+
+### Medication results - otherwise
+
+```{r  split=FALSE, fig.align='center', fig.height=9, warning=FALSE, fig.cap="Fig. 11", out.width="100%"}
+p1 <- adjust_axis(plot_bar_chart(diabetic_data_bin, "metformin"))
+p2 <- adjust_axis(plot_bar_chart(diabetic_data_bin, "repaglinide"))
+p3 <- adjust_axis(plot_bar_chart(diabetic_data_bin, "nateglinide"))
+p4 <- adjust_axis(plot_bar_chart(diabetic_data_bin, "glimepiride"))
+p5 <- adjust_axis(plot_bar_chart(diabetic_data_bin, "glipizide"))
+p6 <- adjust_axis(plot_bar_chart(diabetic_data_bin, "glyburide"))
+p7 <- adjust_axis(plot_bar_chart(diabetic_data_bin, "pioglitazone"))
+p8 <- adjust_axis(plot_bar_chart(diabetic_data_bin, "rosiglitazone"))
+p9 <- adjust_axis(plot_bar_chart(diabetic_data_bin, "acarbose"))
+p10 <- adjust_axis(plot_bar_chart(diabetic_data_bin, "insulin"))
+
+layout <- matrix(1:12, 3, 4, byrow = TRUE)
+multiplot(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, layout = layout)
+```
+
+- For the rest of the diabetic medications, `No` category is predominant. However, for critical drugs such as `insulin` and `metformin`, the `Up` (dosage increase) and `Down` (dosage decrease) categories are not negligible, indicating meaningful treatment adjustments in response to patients' conditions.
+- The absence of a prescribed medication (`No`) could reflect either a well-controlled disease not requiring that specific drug or possibly a gap in care, depending on the clinical context and comorbidity profile.
+- `Steady` medication regimens may suggest better disease management, potentially associated with a lower risk of readmission.
+- In contrast, patients experiencing dosage changes, whether increases (`Up`) or decreases (`Down`), may be in unstable health or undergoing active clinical reassessment, which could correlate with a higher likelihood of readmission.
+
+### Diagosis features
+
+```{r  split=FALSE, fig.align='center', fig.height=9, warning=FALSE, fig.cap="Fig. 12", out.width="100%"}
+p1 <- plot_bar_chart(diabetic_data_bin, "group_diag_1") + 
+  scale_y_log10()
+
+p2 <- plot_bar_chart(diabetic_data_bin, "group_diag_2") + 
+  scale_y_log10()
+
+p3 <- plot_bar_chart(diabetic_data_bin, "group_diag_3") + 
+  scale_y_log10()
+
+layout <- matrix(c(1, 2, 3), 3, 1, byrow = TRUE)
+multiplot(p1, p2, p3, layout = layout)
+```
+The analysis of grouped diagnosis features within the dataset yields the following key insights:
+
+- Circulatory system issues are the most common primary diagnoses, while diabetes-related, digestive, and respiratory conditions also appear frequently.
+
+- The presence of n.a. (missing) diagnosis entries, especially in `diag_3`, is relatively low but not negligible. While not ideal, this level of missingness is unlikely to severely bias the analysis but may still require careful handling (e.g., a separate category).
+
+- Diagnosis groups such as Circulatory and Diabetes are likely to be strong predictors of readmission, given their close clinical ties to poor outcomes and complications in diabetic populations.
+
+### Target variable
+
+Finally, this is what it is all about: whether a patient has been readmitted ("1") or not ("0"):
+
+```{r split=FALSE, fig.align='center', warning=FALSE, fig.cap="Fig. 13", fig.height=3.5, out.width="100%"}
+plot_bar_chart(diabetic_data_bin, "TARGET") + scale_y_log10()
+```
+
+ - The target variable exhibits a **mild class imbalance**, with non-readmitted cases (TARGET = 0) being more frequent than readmitted cases (TARGET = 1).
+ - Despite this imbalance, the minority class still has substantial representation, which allows most standard classifiers to learn meaningful patterns without extreme correction.
+  
+## c) 5 Claim rates for individual features
+
+Calculate and visualize the relative frequencies of the target variable TARGET (i.e., the readmission rates) for each categorical feature, similar to Sections 5.1 to 5.4 of the template. For numerical features, proceed as described in Sections 5.5 and 5.6. Use the functions `multiplot` and `get_binCI`, and group the visualizations according to the grouping defined in subtask R2b). Discuss the key insights from the visualizations, particularly in terms of their relevance for predicting the target variable readmission prediction.
+
+**Solution:**
+
+In order to determine the importance of the individual parameters we will study the distribution of their *readmission rates*, i.e. how large a fraction per categorical variable ended up being readmitted within 30 days or how the distributions of readmission compared with those of no readmission. This analysis will follow a similar structure as above.
+
+Here we estimate error bars from Binomial 95% confidence limits based on the count statistics of the *readmission vs no readmission* cases. These will help us to decide whether potential differences are significant or not. The corresponding helper function `get_binCI` is defined in Section 2.2 above.
+
+```{r}
+# Function to plot admission rate by categorical feature
+plot_admission_by_category <- function(dat, cat_var) {
+  dat %>%
+    group_by(!!sym(cat_var), TARGET) %>%
+    count() %>%
+    spread(TARGET, n, fill = 0) %>%
+    mutate(readmission_rate = `1`/(`1`+`0`)*100,
+           lwr = get_binCI(`1`, (`1`+`0`))[[1]]*100,
+           upr = get_binCI(`1`, (`1`+`0`))[[2]]*100
+           ) %>%
+    ggplot(aes(x = !!sym(cat_var), y = readmission_rate, fill = !!sym(cat_var))) +
+  geom_col() +
+  geom_errorbar(aes(ymin = lwr, ymax = upr), width = 0.5, size = 0.7, color = "gray30") +
+  theme(legend.position = "none", 
+        axis.text.x = element_text(angle = 45, size = 9, hjust = 1)) +
+  labs(x = cat_var, y = "Readmission [%]")
+}
+```
+
+### Demographic features
+
+```{r  split=FALSE, fig.align='center', fig.height=8, warning=FALSE, fig.cap="Fig. 14", out.width="100%"}
+p1 <- adjust_axis(plot_admission_by_category(diabetic_data_bin, "race"), log_y = FALSE)
+p2 <- plot_admission_by_category(diabetic_data_bin, "gender")
+p3 <- adjust_axis(plot_admission_by_category(diabetic_data_bin, "age"), log_y = FALSE)
+p4 <- adjust_axis(plot_admission_by_category(diabetic_data_bin, "weight"), log_y = FALSE)
+
+layout <- matrix(1:4, 2, 2, byrow = TRUE)
+multiplot(p1, p2, p3, p4, layout = layout)
+```
+
+Key insights:
+
+- `race`: The dataset shows slight disparities in readmission rates by race, generally ranging from 10% to 13%. However, these differences are not substantial, and hence race does not appear to be a strong standalone predictor of readmission in this cohort.
+- `gender`: Differences in readmission rates between male and female patients are minimal, indicating gender is not a strong standalone predictor either.
+- `age`: A clear positive association is observed — older age groups tend to have higher readmission rates.
+- `weight`: Extreme weight categories (e.g., underweight: [0–25) or severely overweight) may be linked to higher readmission risks. However, wide confidence intervals suggest limited statistical certainty, likely due to sparse data in those ranges.
+
+### Administrative and provider features
+
+```{r  split=FALSE, fig.align='center', fig.height=14, warning=FALSE, fig.cap="Fig. 15", out.width="100%"}
+p1 <- adjust_axis(plot_admission_by_category(diabetic_data_bin, "admission_type_id"), log_y = FALSE)
+p2 <- adjust_axis(plot_admission_by_category(diabetic_data_bin, "discharge_disposition_id"), log_y = FALSE)
+p3 <- adjust_axis(plot_admission_by_category(diabetic_data_bin, "admission_source_id"), log_y = FALSE)
+p4 <- adjust_axis(plot_admission_by_category(diabetic_data_bin, "payer_code"), log_y = FALSE)
+p5 <- plot_admission_by_category(diabetic_data_bin, "medical_specialty") + 
+  theme(axis.title = element_text(size = 12))
+
+layout <- matrix(c(rep(1:2, 2), rep(3:4, 2), rep(5, 6)), 7, 2, byrow = TRUE)
+multiplot(p1, p2, p3, p4, p5, layout = layout)
+```
+
+Key insights:
+
+ - `admission_type_id`, `admission_source_id`: Certain categories (e.g., type `6`, source `3`, source `20`) exhibit notably higher readmission rates, suggesting these features are relevant predictors.
+ - `discharge_disposition_id`: Categories such as `15` and `28`, which also have substantial sample sizes, show extremely elevated readmission rates. This makes discharge_disposition_id a highly informative feature for modeling.
+ - `payer_code`: Displays clear differences in readmission rates across payers, likely reflecting disparities in insurance coverage, care quality, or follow-up, making it a strong candidate predictor.
+ - `medical_specialty` Readmission rates vary significantly between specialties, with higher rates in Hematology/Oncology and lower in Obstetrics/Gynecology. This indicates meaningful clinical relevance, qualifying it as a strong predictor.
+
+### Patient utillisation history part 1
+
+For the numbering features we will now use a scatter plot with (95% confidence) error bars to emphasise the natural ordering of the values. Furthermore, for the sake of readability, we removed feature values occurs in the dataset fewer than ten times. Otherwise this would lead to a large statistical error bar that would dominate the plot and make it harder to read.
+
+For features with a larger range of values, i.e. `num_lab_procedures` and `num_medications`, we're switching to overlapping density plots.
+
+```{r}
+# Create a scatter plot for integer features
+plot_admission_by_integer <- function(dat, int_var) {
+  
+  dat %>%
+    group_by(!!sym(int_var), TARGET) %>%
+    count() %>%
+    spread(TARGET, n, fill = 0) %>%
+    # Filter values with counts of at least 10
+    filter((`1`+`0`) >= 10) %>%
+    mutate(readmission_rate = `1`/(`1`+`0`)*100,
+           lwr = get_binCI(`1`,(`1`+`0`))[[1]]*100,
+           upr = get_binCI(`1`,(`1`+`0`))[[2]]*100
+           ) %>%
+    ggplot(aes(!!sym(int_var), readmission_rate)) +
+    geom_point(color = "blue") +
+    geom_errorbar(aes(ymin = lwr, ymax = upr), width = 0.5, size = 0.7, color = "blue") +
+    theme(legend.position = "none") +
+    labs(x = int_var, y = "Readmission [%]")
+}
+
+# Create a density plot for numeric features
+plot_admission_density <- function(dat, cont_var) {
+  dat %>%
+    ggplot(aes(!!sym(cont_var), fill = TARGET)) +
+    geom_density(alpha = 0.5)
+}
+```
+
+```{r  split=FALSE, fig.align='center', fig.height=8, warning=FALSE, fig.cap="Fig. 16", out.width="100%"}
+p1 <- plot_admission_by_integer(diabetic_data_bin, "time_in_hospital")
+p2 <- plot_admission_density(diabetic_data_bin, "num_lab_procedures")
+p3 <- plot_admission_by_integer(diabetic_data_bin, "num_procedures")
+p4 <- plot_admission_density(diabetic_data_bin, "num_medications")
+
+layout <- matrix(1:4, 2, 2, byrow = TRUE)
+multiplot(p1, p2, p3, p4, layout = layout)
+```
+
+Key insights:
+
+ - `time_in_hospital`: Readmission rates increase steadily with the length of hospital stay, suggesting that more severe or complex cases are more prone to readmission, making it a potential predictor.
+ - `num_lab_procedures`: Patients with higher numbers of lab tests tend to be more concentrated among the readmitted group, showing moderate predictive value.
+ - `num_procedures`: Displays no clear trend in readmission rates. Additionally, higher variability among patients with ≥3 procedures suggests low reliability as a predictor.
+ - `num_medications`: Shows noticeable deviations in readmission rates, particularly in the mid-range (10–40 medications). This non-linear relationship hints at potential predictive power.
+
+### Patient utillisation history part 2
+
+```{r split=FALSE, fig.align='center', fig.height=8, warning=FALSE, fig.cap="Fig. 17", out.width="100%"}
+p5 <- plot_admission_by_integer(diabetic_data_bin, "number_outpatient")
+p6 <- plot_admission_by_integer(diabetic_data_bin, "number_emergency")
+p7 <- plot_admission_by_integer(diabetic_data_bin, "number_inpatient")
+p8 <- plot_admission_by_integer(diabetic_data_bin, "number_diagnoses")
+
+layout <- matrix(1:4, 2, 2, byrow = TRUE)
+multiplot(p5, p6, p7, p8, layout = layout)
+```
+
+Key insights:
+
+ - All these variables exhibit stronger signals in *readmission rates* compared to simple frequency distributions, underscoring their predictive value.
+ - `number_emergency` and `number_inpatient` exhibits a clear positive correlation with readmission rate, whereas `number_outpatient` displays a slight upward trend but with greater variability at higher values.
+ - `number_diagnoses` exhibits a monotonically increasing trend in readmission rate, making this feature a strong and consistent predictor.
+
+### Lab test results
+
+```{r  split=FALSE, fig.align='center', warning=FALSE, fig.cap="Fig. 18", out.width="100%"}
+p1 <- adjust_axis(plot_admission_by_category(diabetic_data_bin, "max_glu_serum"), log_y = FALSE)
+p2 <- adjust_axis(plot_admission_by_category(diabetic_data_bin, "A1Cresult"), log_y = FALSE)
+
+layout <- matrix(1:2, 1, 2, byrow = TRUE)
+multiplot(p1, p2, layout = layout)
+```
+
+Key insights:
+
+ - `max_glu_serum`: Elevated glucose levels (`>200` or `>300`) are clearly associated with higher readmission rates
+ - `A1Cresult`: While the presence of an HbA1c test (as opposed to "None") is generally linked to lower readmission rates, the actual HbA1c levels (even `>7` or `>8`) do not show a strong, consistent signal in predicting readmission.
+
+### Medication results - overall
+
+```{r  split=FALSE, fig.align='center', warning=FALSE, fig.cap="Fig. 19", out.width="100%"}
+p1 <- plot_admission_by_category(diabetic_data_bin, "change")
+p2 <- plot_admission_by_category(diabetic_data_bin, "diabetesMed")
+
+layout <- matrix(1:2, 1, 2, byrow = TRUE)
+multiplot(p1, p2, layout = layout)
+```
+
+Key insights:
+
+ - Medication Change (`change`): Patients whose medications were changed (~14.5% readmission) experienced higher readmission rates compared to those with no change (~12.5%). However, the difference is relatively modest, suggesting that while medication change may indicate underlying health shifts, its predictive power on its own is limited.
+ - Use of Diabetes Medication (`diabetesMed`): Patients on diabetes medication had a higher readmission rate (~14%) than those not on such medication (~10.5%). This suggests that active diabetes management, possibly due to more severe conditions, is linked to increased risk of readmission.
+
+### Medication results - unary
+
+```{r  split=FALSE, fig.align='center', fig.height=6, warning=FALSE, fig.cap="Fig. 20", out.width="100%"}
+p1 <- plot_admission_by_category(diabetic_data_bin, "acetohexamide")
+p2 <- plot_admission_by_category(diabetic_data_bin, "troglitazone")
+p3 <- plot_admission_by_category(diabetic_data_bin, "examide")
+p4 <- plot_admission_by_category(diabetic_data_bin, "citoglipton")
+p5 <- plot_admission_by_category(diabetic_data_bin, "glipizide-metformin")
+p6 <- plot_admission_by_category(diabetic_data_bin, "glimepiride-pioglitazone")
+p7 <- plot_admission_by_category(diabetic_data_bin, "metformin-rosiglitazone")
+p8 <- plot_admission_by_category(diabetic_data_bin, "metformin-pioglitazone")
+
+layout <- matrix(1:8, 2, 4, byrow = TRUE)
+multiplot(p1, p2, p3, p4, p5, p6, p7, p8, layout = layout)
+```
+
+Again, these features do not contribute any discriminative information and hence can be safely ignored without loss of predictive power.
+
+### Medication results - binary
+
+```{r  split=FALSE, fig.align='center', fig.height=6, warning=FALSE, fig.cap="Fig. 21", out.width="100%"}
+p1 <- plot_admission_by_category(diabetic_data_bin, "chlorpropamide")
+p2 <- plot_admission_by_category(diabetic_data_bin, "tolbutamide")
+p3 <- plot_admission_by_category(diabetic_data_bin, "miglitol")
+p4 <- plot_admission_by_category(diabetic_data_bin, "tolazamide")
+p5 <- plot_admission_by_category(diabetic_data_bin, "glyburide-metformin")
+
+layout <- matrix(1:5, 1, 5, byrow = TRUE)
+multiplot(p1, p2, p3, p4, p5, layout = layout)
+```
+
+Key insights:
+
+- Patients on a steady regimen generally exhibit lower readmission rates than those not on the drug. 
+- However, large error bars suggest high statistical uncertainty. Combined with their limited exposure, this implies that these medications may not serve as strong individual predictors of readmission.
+
+### Medication results - otherwise
+
+```{r  split=FALSE, fig.align='center', fig.height=9, warning=FALSE, fig.cap="Fig. 22", out.width="100%"}
+p1 <- plot_admission_by_category(diabetic_data_bin, "metformin")
+p2 <- plot_admission_by_category(diabetic_data_bin, "repaglinide")
+p3 <- plot_admission_by_category(diabetic_data_bin, "nateglinide")
+p4 <- plot_admission_by_category(diabetic_data_bin, "glimepiride")
+p5 <- plot_admission_by_category(diabetic_data_bin, "glipizide")
+p6 <- plot_admission_by_category(diabetic_data_bin, "glyburide")
+p7 <- plot_admission_by_category(diabetic_data_bin, "pioglitazone")
+p8 <- plot_admission_by_category(diabetic_data_bin, "rosiglitazone")
+p9 <- plot_admission_by_category(diabetic_data_bin, "acarbose")
+p10 <- plot_admission_by_category(diabetic_data_bin, "insulin")
+
+layout <- matrix(1:12, 3, 4, byrow = TRUE)
+multiplot(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, layout = layout)
+```
+
+Key insights:
+
+- Medications like `nateglinide`, `rosiglitazone`, and `acarbose` show little variation in readmission rates, even with sufficient data and small error bars, suggesting they are not useful as standalone predictors. 
+- Notably, `metformin` is associated with lower readmission rates when prescribed, while most other drugs such as `insulin` show higher readmission rates when either prescribed or when dosages are increased.
+
+
+### Diagosis features
+
+```{r  split=FALSE, fig.align='center', fig.height=9, warning=FALSE, fig.cap="Fig. 23", out.width="100%"}
+p1 <- plot_admission_by_category(diabetic_data_bin, "group_diag_1")
+p2 <- plot_admission_by_category(diabetic_data_bin, "group_diag_2")
+p3 <- plot_admission_by_category(diabetic_data_bin, "group_diag_3")
+
+layout <- matrix(c(1, 2, 3), 3, 1, byrow = TRUE)
+multiplot(p1, p2, p3, layout = layout)
+```
+
+The analysis of grouped diagnosis features within the dataset yields the following key insights:
+
+- Certain diagnosis groups, such as *Neoplasms*, *Circulatory*, and *Respiratory* conditions, exhibit notably higher readmission rates, particularly in `group_diag_1` and `group_diag_2`. 
+- On the other hand, *Diabetes* and *Musculoskeletal* conditions tend to show lower readmission rates across all three diagnostic levels.
+- The *n.a.* category, which likely represents missing or ambiguous diagnoses, is associated with high uncertainty, as indicated by large error bars, suggesting potential issues with the rarity of the data. 
+- Overall, diagnosis groups are strong predictors of readmission rates, with certain categories exhibiting significantly varying readmission rates.
+
+## d) 6 Multi-feature comparisons
+
+Create a correlation matrix similar to Section 6.1 of the template. Discuss the key insights, especially with regard to their relevance for predicting the target variable.
+
+**Solution:**
+
+After studying each feature individually we will now start to look at *interactions* between them. 
+
+### Correlation overview
+
+We begin with a correlation matrix plot as a first comprehensive overview of our multi-parameter space. We will then take this overview plot as a starting point to investigate specific multi-feature comparisons in the following. Those examinations will likely result in more questions, which we can also examine (to a certain extend) in the same step.
+
+What we will see here is the correlation coefficients for each combination of two features. In simplest terms: this shows whether two features are connected so that one changes with a predictable trend if you change the other. The closer this coefficient is to zero the weaker is the correlation. Both 1 and -1 are the ideal cases of perfect correlation and anti-correlation.
+
+Here we will only include those features that we found to be useful in the previous step. Thereby, our plot will be easier to read and more informative. Note that for the purpose of this plot we will recode our factor features as integers.
+
+```{r split=FALSE, fig.align='center', fig.height=10, warning=FALSE, fig.cap="Fig. 24", out.width="100%"}
+diabetic_data_bin %>%
+  select(-weight, 
+         -acetohexamide, -troglitazone, -examide, -citoglipton, 
+         -`glipizide-metformin`, -`glimepiride-pioglitazone`, -`metformin-rosiglitazone`, -`metformin-pioglitazone`, 
+         -chlorpropamide, -tolbutamide, -miglitol, -tolazamide, -`glyburide-metformin`) %>%
+  mutate(across(where(is.factor), ~ as.integer(.))) %>%
+  cor(use = "complete.obs", method = "spearman") %>%
+  corrplot(type = "lower", tl.col = "black", diag = FALSE)
+```
+
+In this kind of plot we want to look for the bright, large circles which immediately show the strong correlations (size and shading depends on the absolute values of the coefficients; colour depends on direction). Anything that you would have to squint to see is usually not worth seeing. 
+
+Key insights:
+
+- Most features appear to have low pairwise correlations, indicating a lack of multicollinearity. This is helpful when building predictive models like logistic regression or tree-based classifiers.
+
+- There is no obvious correlation with the TARGET feature. This could be caused by the sparsity of the `target == 1` values. Since no single variable shows a strong linear relationship with readmission, a multivariate approach (e.g., decision trees, ensemble methods) is more appropriate than relying on linear models or univariate thresholds.
+
+- Some features appear to be primarily correlated with others in their group, such as those within the group "patient utilization history". 
+
+Here we plot only the moderately to highly correlated features by showing their correlation coefficients directly:
+
+```{r split=FALSE, fig.align='center', fig.height=8, warning=FALSE, fig.cap="Fig. 25", out.width="100%"}
+diabetic_data_bin %>%
+  select(admission_type_id, admission_source_id, 
+         time_in_hospital, num_lab_procedures, num_procedures, num_medications,
+         # number_diagnoses, max_glu_serum, A1Cresult, group_diag_1,
+         metformin, insulin, 
+         change, diabetesMed) %>%
+  mutate(across(where(is.factor), ~ as.integer(.))) %>%
+  cor(use = "complete.obs", method = "spearman") %>%
+  corrplot(type = "lower", tl.col = "black", diag = FALSE, method = "number")
+```
+
+Key insights:
+
+- There is a strong correlation of 0.55 between `insulin` and `diabetesMed`; Other correlations that exist are weaker but still notable.
+
+- Some anti-correlations exist as well, with *change* and `diabetesMed` accounting for the strongest coefficient with -0.51.
+
+- Furthermore, some features, for example *num_procedures*,  which showed only a small effect in the individual plots, exhibits correlation with other significant features, the fact of which might be interesting.
+
+### Exploring correlated features
+
+Now we will have a closer look at those features we find to be correlated. Here our visualisation will depend on the feature group and how strong the relationship is.
+
+
+#### Pairwise relationships
+
+We begin with a layout of plots that examine the one-to-one relations for all pairings with an (absolute value) *correlation coefficient above 0.4*:
+
+```{r split=FALSE, fig.align='center', warning=FALSE, fig.cap="Fig. 26", out.width="100%"}
+p1 <- diabetic_data_bin %>%
+  ggplot(aes(insulin, diabetesMed)) +
+  geom_count(color = "orange")
+
+p2 <- diabetic_data_bin %>%
+  ggplot(aes(change, diabetesMed)) +
+  geom_count(color = "orange")
+
+p3 <- diabetic_data_bin %>%
+  ggplot(aes(time_in_hospital, num_medications)) +
+  geom_point() +
+  geom_smooth(method = 'gam', color = "red")
+  
+layout <- matrix(c(1, 2, 3, 3), 2, 2,byrow = TRUE)
+multiplot(p1, p2, p3, layout = layout)
+
+# Remove all plots at the end
+rm(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15, p16)
+```
+
+Key insights:
+
+- We study the *binary* feature relations using count plots, where the size of the dots correspond to the number of cases. For `insulin` and `change` vs `diabetesMed`, we see that the predominant associations are `insulin == "Steady"` and `change == "Ch"` with `diabetesMed == "Yes"`, respectively. There are no cases in these two relations were  `diabetesMed`is "Yes".
+
+- For the numbering features we use a scatter plot together with a simple smoothing model to visualise their relationships. In case of `time_in_hospital` vs `num_medications`, the linear relation is formally present.
+
+# Task R3: Data Splitting and XGBoost
+
+In this task, you will split the two datasets `diabetic_data_bin` (for binary classification) and `diabetic_data_ter` (for ternary classification) into training, validation, and test datasets for subsequent modeling and apply a first machine learning model with XGBoost for binary classification. Starting from subtask R3b), code snippets from the SWoF template must be extracted and modified in certain places. The goal of these modifications is to ensure that the code runs with minimal adjustments, using the training, validation, and test datasets prepared in subtask R3a) as input. For this and all subsequent tasks related to binary classification, the “area under the ROC curve” (AUC) is to be used as the evaluation metric for machine learning models. At the beginning of each relevant subtask, the corresponding section of the SWoF template is indicated in bold.
+
+## a) Data Splitting
+
+Split the two datasets `diabetic_data_bin` and `diabetic_data_ter` into training, validation,
+and test datasets in a 70:15:15 ratio. Ensure that the target variable TARGET is correctly stratified during the splitting process to maintain class distribution. Output the number of rows in the training, validation, and test datasets, as well as the class proportions in each subsets.
+
+**Solution:**
+
+To split the datasets with a 70:15:15 ratio, while stratifying based on the TARGET variable, we use the function `createDataPartition` from the `caret` package for stratified sampling. 
+
+```{r}
+split_data <- function(dat) {
+  # Step 1: Initial 70% training split stratified on TARGET
+  train_index <- createDataPartition(dat$TARGET, times = 1, p = 0.7, list = FALSE)
+  train <- dat[train_index, ]
+  temp <- dat[-train_index, ]
+  
+  # Step 2: Split remaining 30% into 15% validation and 15% test (i.e., 50:50 of remaining data)
+  valid_index <- createDataPartition(temp$TARGET, times = 1, p = 0.5, list = FALSE)
+  valid <- temp[valid_index, ]
+  test <- temp[-valid_index, ]
+  
+  list(train = train, 
+       valid = valid, 
+       test = test)
+}
+
+# split the datasets `diabetic_data_bin` and `diabetic_data_ter`
+diabetic_data_bin_splitted <- split_data(diabetic_data_bin)
+diabetic_data_ter_splitted <- split_data(diabetic_data_ter)
+
+rm(diabetic_data_bin, diabetic_data_ter)
+```
+
+```{r}
+# Function to output number of rows as well as the class proportions
+output_data_splitted <- function(data_splitted) {
+  cat("\n\nRows in training set:", nrow(data_splitted$train), "\n")
+  cat("Class proportions in training set (%):\n")
+  print(round(100 * prop.table(table(data_splitted$train$TARGET)), 2))
+  
+  cat("\n\nRows in validation set:", nrow(data_splitted$valid), "\n")
+  cat("Class proportions in validation set (%):\n")
+  print(round(100 * prop.table(table(data_splitted$valid$TARGET)), 2))
+  
+  cat("\n\nRows in test set:", nrow(data_splitted$test), "\n")
+  cat("Class proportions in test set (%):\n")
+  print(round(100 * prop.table(table(data_splitted$test$TARGET)), 2))
+}
+```
+
+```{r}
+# Output for the dataset `diabetic_data_bin`
+cat("Dataset:", "diabetic_data_bin")
+output_data_splitted(diabetic_data_bin_splitted)
+```
+
+```{r}
+# Output for the dataset `diabetic_data_bin`
+cat("Dataset:", "diabetic_data_ter")
+output_data_splitted(diabetic_data_ter_splitted)
+```
+
+In the following, we assume our training, validation, as well as test data sets to be similar in the distributions of their features, i.e. the split appears to be well executed and stratified by feature levels as well.
+
+## b) 8.3 XGBoost parameters and fitting
+
+Use the code from the indicated section of the template and ensure that it runs correctly. Adjust the code and parameters where necessary and appropriate to properly train the XGBoost model. Briefly discuss the role of the hyperparameters `colsample_bytree`, `subsample`, `max_depth`, and `eta` in the context of XGBoost, and compute the AUC score on the test dataset.
+
+**Solution:**
+
+#### Step 1: Prepare the data
+
+In order for *XGBoost* to properly ingest our data samples we need to re-format them slightly:
+
+```{r}
+# Feature formatting
+process_data_for_xgboost <- function(dat) {
+  dat_x <- dat %>%
+    mutate(across(where(is.factor), ~ as.integer(.))) %>%
+    select(-TARGET)
+  dat_x <- as.matrix(dat_x)
+  
+  # Encode TARGET as 0, 1, ...
+  dat_y <- as.integer(dat$TARGET) - 1
+  
+  return(list(dat_x = dat_x, dat_y = dat_y))
+}
+
+xgb_train <- process_data_for_xgboost(diabetic_data_bin_splitted$train)
+xgb_valid <- process_data_for_xgboost(diabetic_data_bin_splitted$valid)
+xgb_test <- process_data_for_xgboost(diabetic_data_bin_splitted$test)
+
+dtrain <- xgb.DMatrix(xgb_train$dat_x,label = xgb_train$dat_y)
+dvalid <- xgb.DMatrix(xgb_valid$dat_x,label = xgb_valid$dat_y)
+dtest <- xgb.DMatrix(xgb_test$dat_x)
+```
+
+#### Step 2: Define hyperparameter grid
+
+Key XGBoost hyperparameters  that govern how *XGBoost* operates explained:
+
+- `colsample_bytree`: Controls the fraction of features (columns) to be randomly sampled when constructing each tree. Subsampling occurs once for every tree constructed. Values range in (0, 1]. Lower values can help prevent overfitting by introducing feature randomness. 
+
+- `subsample`: Denotes the fraction of the training instances to be randomly sampled once every boosting iteration. Values range in (0, 1]. By adding randomness to the training process, subsampling can prevent overfitting. 
+
+- `max_depth`: Sets the maximum depth of a tree. Deeper trees can model more complex relationships but may overfit the data. Typical values range from 3 to 10.
+
+- `eta`: Controls the step size shrinkage used in updates to prevent overfitting, the so-called learning rate. Lower values make the model more robust to overfitting but require more boosting rounds. Typical values range from 0.01 to 0.3.
+
+We now specify the grid of hyperparameters to search over. Note that this step is commented out in subsequent runs after identifying the best parameters in the initial run, in order to save compilation time when knitting the report to HTML.
+
+```{r}
+# # Define hyperparameter grid
+# xgb_grid <- expand.grid(
+#   colsample_bytree = c(0.6, 0.8, 1.0),
+#   subsample = c(0.6, 0.8, 1.0),
+#   max_depth = c(3, 5, 7),
+#   eta = c(0.01, 0.1, 0.5)
+# )
+```
+
+#### Step 3: Perform cross-validation
+
+For each combination of hyperparameters, we use `xgb.cv` to perform a cross-validation (CV) step to measure our model's performance.
+
+We are using a 5-fold CV, which essentially means that we split our data in 5 parts and train on any 4 of them while evaluating on the remaining one. This is done iteratively, so that every fold becomes the validation fold. This is an efficient way to measure the performance of your fit on data it has not seen.
+
+Again, this step is commented out in subsequent runs after identifying the best parameters in the initial run, in order to save compilation time when knitting the report to HTML.
+
+```{r}
+# # Initialize progress bar and set the seed anew
+# pb <- txtProgressBar(min = 0, max = nrow(xgb_grid), style = 3)
+# set.seed(seed)
+# 
+# # Loop over each combination of hyperparameters
+# for (i in 1:nrow(xgb_grid)) {
+#   # Set XGBoost parameters
+#   xgb_params <- list(colsample_bytree = xgb_grid$colsample_bytree[i], # variables per tree
+#                      subsample = xgb_grid$subsample[i], # data subset per tree
+#                      booster = "gbtree",
+#                      max_depth = xgb_grid$max_depth[i], # tree levels
+#                      eta = xgb_grid$eta[i], # shrinkage
+#                      eval_metric = "auc",
+#                      objective = "reg:logistic"
+#                      )
+# 
+#   xgb_cv <- xgb.cv(xgb_params,
+#                    dtrain,
+#                    nrounds = 120,
+#                    nfold = 5,
+#                    verbose = FALSE,
+#                    early_stopping_rounds = 5,
+#                    maximize = TRUE)
+# 
+#   # Get the auc score
+#   xgb_grid$auc[i] <- max(xgb_cv$evaluation_log$test_auc_mean)
+# 
+#   # Update progress bar
+#   setTxtProgressBar(pb, i)
+# }
+# 
+# # Close progress bar
+# close(pb)
+# 
+# best_params <- xgb_grid[which.max(xgb_grid$auc), ]
+```
+
+
+#### Step 4: Train the final model
+Having found the best parameters and features during cross-validation, we can now train our classifier.
+
+```{r}
+# The best hyperparameters found in the initial run
+best_params <- data.frame(colsample_bytree = 0.6, 
+                          subsample = 0.8, 
+                          max_depth = 5, 
+                          eta = 0.1)
+
+# Set XGBoost parameters
+xgb_params <- list(colsample_bytree = best_params$colsample_bytree, # variables per tree
+                   subsample = best_params$subsample, # data subset per tree
+                   booster = "gbtree",
+                   max_depth = best_params$max_depth, # tree levels
+                   eta = best_params$eta, # shrinkage
+                   eval_metric = "auc",
+                   objective = "reg:logistic",
+                   nthread = 1
+                   )
+
+# Define watchlist to monitor training and validation error
+watchlist <- list(train = dtrain, valid = dvalid)
+
+# Train the XGBoost with the best parameter found
+set.seed(seed)
+xgb <- xgb.train(params = xgb_params,
+                 data = dtrain, 
+                 print_every_n = 5,
+                 watchlist = watchlist, 
+                 nrounds = 120, 
+                 maximize = TRUE, 
+                 early_stopping_rounds = 5)
+```
+
+Be aware that this is not a competitive model. Other (engineered) features can be included, the meta-parameters can be optimised, and a larger amount of training steps can be run. In addition, several kernels have already shown the power of ensembling different individual models into a combined prediction that shows better results. 
+
+What this basic model can do is to serve as an example on how to construct your own prediction and give you a place to start from. Make sure to check out other modelling kernels as well to get a broader overview.
+
+#### Step 5: Evaluate the model on the test set
+
+Once we are reasonably happy with our model, we use it to predict and compute the AUC on the test dataset:
+
+```{r}
+# Predict probabilities on the test set
+xgb_probs <- predict(xgb, newdata = dtest)
+
+# Compute AUC using MLmetrics
+auc_xgb <- AUC(y_pred = xgb_probs, y_true = xgb_test$dat_y)
+
+# Output the AUC score
+cat("Test AUC (XGBoost):", auc_xgb, "\n")
+```
+
+## c) 8.4 Feature importance
+
+Compute the feature importances of the XGBoost model just trained and visualize them using an appropriate plot. Identify the most important features and provide a brief qualitative discussion on why they may be relevant for predicting readmissions (no specific knowledge of health insurance or healthcare is required). Finally, briefly outline the potential implications of these findings for model development, predictive performance, and the design of preventive insurance strategies.
+
+**Solution:**
+
+After training we will check which features are the most important for our model. This can provide the starting point for an iterative process where we identify, step by step, the significant features for a model. Here we will simply visualise these features:
+
+```{r split=FALSE, fig.align='center', warning=FALSE, fig.cap="Fig. 27", out.width="100%"}
+imp_matrix <- as.tibble(xgb.importance(feature_names = colnames(xgb_train$dat_x), 
+                                       model = xgb))
+
+imp_matrix %>%
+  ggplot(aes(reorder(Feature, Gain, FUN = max), Gain, fill = Feature)) +
+  geom_col() +
+  coord_flip() +
+  theme(legend.position = "none") +
+  labs(x = "Features", y = "Importance")
+```
+##### Feature importance insights
+
+Based on the feature importance plot, the following variables emerged as the most significant predictors of readmission, along with the rationale behind their relevance:
+
+1. `number_inpatient`: This represents the number of prior inpatient visits. Frequent hospitalizations often indicate chronic health conditions or inadequate disease management, both of which are strong predictors of future readmissions.
+
+2. `discharge_disposition_id`: Indicates where the patient was discharged to (e.g., home, hospice, rehab). Certain dispositions, such as skilled nursing or home care, are typically associated with more severe health statuses and thus a higher likelihood of readmission.
+
+3. `diag_1`, `diag_2`, `diag_3`: Primary, secondary and tertiary diagnoses. Specific diagnoses (e.g., heart failure, diabetes complications) are strongly linked to readmissions due to their complexity and the need for ongoing treatment.
+
+4. `time_in_hospital`: Longer hospital stays generally indicate more severe conditions or complications, both of which increase the probability of readmission.
+
+5. `num_emergency`, `number_diagnoses`, `num_medications`, `num_lab_procedures`: These features reflect the complexity of a patient's medical condition. High values can signal extensive treatment needs, polypharmacy, or frequent acute events; all of which are potential indicators of higher readmission risk.
+
+6. `age`: Older patients are more likely to experience complications or slower recovery post-discharge, increasing the risk of being readmitted.
+
+7. `payer_code`: This reflects the patient’s insurance type, which can serve as a proxy for access to healthcare resources, socioeconomic status, or continuity of care post-discharge.
+
+**Implications for model development**:
+
+- Feature selection:
+  * The dominance of a few features suggests that a smaller, more interpretable model could yield comparable performance to more complex alternatives.
+  * Features with very low importance (e.g., some rarely used medications) can be excluded to reduce overfitting and computational load.
+
+- Custom feature engineering:
+  * Grouping similar categorical values (e.g., discharge codes or diagnosis categories) based on clinical relevance or statistical behavior can enhance generalization.
+  * Interaction features such as `age × number_inpatient` or `diag_1 × discharge_disposition` may help uncover non-linear effects and improve prediction.
+
+- Handling of categorical variables:
+  * For high-cardinality categorical variables like `discharge_disposition_id`, consider advanced encoding methods, such as embeddings, to preserve predictive signal without overfitting.
+
+**Implications for predictive performance**:
+
+- Improved AUC: Focusing on top-ranked predictors helps the model better distinguish between readmitted and non-readmitted patients, improving classification metrics such as AUC.
+- Better Generalization: Models built on robust, clinically meaningful features, such as `number_inpatient` and `diag_1`, are more likely to perform well on unseen data.
+
+**Implications for preventive insurance strategies**:
+
+- Targeted Interventions: Use high-risk indicators to proactively identify patients who may benefit from enhanced post-discharge support, such as follow-up calls, home visits, or disease management programs.
+- Personalized risk-based plans: Leverage the model outputs to design patient-specific wellness or insurance plans, aligning resources with individual risk profiles to reduce preventable readmissions and associated costs.
+
+In the following, we will consistently use the package `caret` via its advantage as a uniform interface for streamlining the process for creating predictive models.
+
+# Task R4: Logistic Regressions Without and With Interactions
+
+Following the examination of an XGBoost model for binary classification in Task R3, this task focuses on Logistic Regression. Both a Logistic Regression without interactions and a model with interactions will be explored. The training and test datasets prepared in subtask R3a) serve as input data.
+
+## a) Logistic Regression Without Interactions
+
+Train a basic Logistic Regression that uses all relevant predictors (without interactions). Select only features that have at least two distinct values, and exclude the target variable as well as the diagnosis columns (`diag_1`, `diag_2`, `diag_3`). Briefly discuss, in four to five bullet points, the key insights derived from the coefficients of the resulting Logistic Regression. Compute the AUC score of this model on the test dataset and output the result. Generate and visualize a confusion matrix that compares the model’s predictions with the actual values in the test dataset. Before constructing the confusion matrix, briefly discuss the challenges of choosing an appropriate threshold, particularly in balancing sensitivity and specificity. Then, use a threshold of 0.2 to generate the matrix.
+
+**Solution:**
+
+In the following, we will use consistently the package `caret` for its advantage as a unique interface to streamline the process for creating predictive models and keep the entire workflow in a single, consistent framework.
+
+#### Step 1: Setup and preprocessing
+
+```{r}
+# Perform feature selection
+feature_selection <- function(dat) {
+  # Exclude features with a unique value
+  dat %>%
+    select(-acetohexamide, -troglitazone, -examide, -citoglipton, 
+           -`glipizide-metformin`, -`glimepiride-pioglitazone`, 
+           -`metformin-rosiglitazone`, -`metformin-pioglitazone`) %>%
+    select(-starts_with("diag_"))
+}
+
+train <- feature_selection(diabetic_data_bin_splitted$train)
+valid <- feature_selection(diabetic_data_bin_splitted$valid)
+test <- feature_selection(diabetic_data_bin_splitted$test)
+
+# Recode levels to "X0" and "X1" as caret expects two-level factors with proper names
+levels(train$TARGET) <- make.names(levels(train$TARGET))
+levels(valid$TARGET) <- make.names(levels(valid$TARGET))
+levels(test$TARGET) <- make.names(levels(test$TARGET))
+```
+
+
+#### Step 2: Train the logistic regression model on training dataset
+
+We use the training set to fit the model and, in general, the validation set to select the best model parameters. While standard logistic regression does not have tunable hyperparameters (thus a validation set is not strictly necessary), regularized versions (e.g., Lasso or Ridge regression) introduce penalty terms that require parameter tuning — which we explore later.
+
+```{r}
+# Set up train control without resampling (since validation is separate)
+# `twoClassSummary` assumes that the second factor level is the positive class
+ctrl <- trainControl(
+  method = "none", # No cross-validation
+  classProbs = TRUE, # Needed to compute probabilities for ROC
+  summaryFunction = twoClassSummary # To use AUC
+  # verboseIter = TRUE
+)
+
+# Train logistic regression on training set
+set.seed(seed)
+logit <- train(
+  TARGET ~ .,
+  data = train,
+  method = "glm",
+  family = "binomial",
+  trControl = ctrl,
+  metric = "ROC"
+)
+```
+
+```{r}
+# Print model summary
+summary(logit)
+```
+
+Based on the coefficients and significance levels in the logistic regression output for predicting hospital readmission, here are the key insights:
+
+- **Hospitalization history and inpatient count are strong predictors**: The variable `number_inpatient` has a very significant positive coefficient (p < 2e-16), suggesting that a higher number of prior inpatient visits is strongly associated with increased likelihood of readmission.
+
+- **Certain discharge dispositions greatly influence readmission risk**: Dispositions like `discharge_disposition_id3`, `id5`, and `id22` are highly significant (p < 0.001) with large positive or negative coefficients, indicating they are critical predictors. For example, `id2` likely corresponds to patients discharged to another facility, which increases readmission risk.
+
+- **Some medical specialties reduce readmission odds**: Specialties like *Orthopedics-Reconstructive* and *ObstetricsandGynecology* show negative and significant coefficients, suggesting patients under their care have a lower probability of being readmitted.
+
+- **Diabetes medication usage impacts readmission**: The variable `diabetesMedYes` is statistically significant, indicating that diabetes management plays a notable role in predicting readmission.
+
+- **Diagnosis groups vary in predictive power**: Group primary diagnosis indicators such as `group_diag_1Respiratory` are highly significant and negatively associated with readmission, highlighting the differing risk profiles across disease categories. With the exception of `group_diag_2Diabetes`, all secondary and tertiary diagnosis groups are not statistically significant at the 5% level.
+
+```{r}
+# Predict probabilities
+log_probs <- predict(logit, newdata = test, type = "prob")[, "X1"]
+
+# Compute AUC
+auc_log <- AUC(y_pred = log_probs, y_true = as.numeric(test$TARGET) - 1)
+cat("Test AUC (Logistic Regression):", auc_log, "\n")
+```
+
+**<u>Threshold Selection in Classification Models</u>**
+
+In binary classification problems like predicting hospital readmission, the model outputs probabilities. To convert these into class predictions, we apply a threshold, usually 0.5 by default. But this may not always be ideal.
+
+Challenges in choosing a threshold:
+  
+ - Imbalanced data: If one class (e.g., readmitted patients) is rare, a threshold of 0.5 might miss many true positives.
+ - Sensitivity vs. specificity:
+    * A lower threshold (e.g., 0.2) increases sensitivity (true positive rate) but may also increase false positives.
+    * A higher threshold increases specificity but may miss actual cases.
+ - Use-case dependency: In healthcare, missing a high-risk patient (false negative) can be more costly than a false positive, motivating the use of a lower threshold.
+
+We use now a threshold of 0.2 to generate the confusion matrix.
+
+```{r}
+# Apply custom threshold and relabel back the levels of the TARGET
+threshold <- 0.2
+pred_classes <- factor(ifelse(log_probs > threshold, "1", "0"), levels = c("1", "0"))
+actual_classes <- factor(test$TARGET, levels = c("X1", "X0"), labels = c("1", "0"))
+
+# Create confusion matrix
+conf_matrix <- confusionMatrix(pred_classes, actual_classes)
+
+# Print confusion matrix
+print(conf_matrix)
+```
+
+We then visualize the confusion matrix using a simple `geom_tile` plot for clarity and interpretability.
+
+```{r split=FALSE, fig.align='center', warning=FALSE, fig.cap="Fig. 28", out.width="100%"}
+# Visualize confusion matrix
+visualize_cm <- function(conf_matrix) {
+  # Convert the table to a data frame for plotting
+  cm_df <- as.data.frame(conf_matrix$table)
+
+  # Make sure the levels are ordered so "1" comes first in both axes
+  cm_df$Reference <- factor(cm_df$Reference, levels = c("1", "0"))
+  cm_df$Prediction <- factor(cm_df$Prediction, levels = c("0", "1"))
+
+  # Plot
+  ggplot(data = cm_df, aes(x = Reference, y = Prediction, fill = Freq)) +
+    geom_tile(color = "white") +
+    geom_text(aes(label = Freq), size = 6) +
+    scale_fill_gradient(low = "white", high = "steelblue") +
+    labs(
+      title = "Confusion Matrix",
+      x = "Actual",
+      y = "Predicted") +
+    theme_minimal() + 
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold"),
+      axis.text = element_text(size = 12),
+      axis.title = element_text(size = 14))
+}
+
+visualize_cm(conf_matrix)
+```
+
+## b) Logistic Regression With Interactions 
+
+Use, for example, the `hstats` package to identify interactions between the predictors of the XGBoost model from Task R3. Briefly explain in a few sentences how these interactions are detected. Select the three most significant interactions that do not involve `diag_1`, `diag_2`, or `diag_3`, and incorporate these interactions into the Logistic Regression from subtask R4a) by extending the regression formula accordingly. Train this enhanced model on the training dataset, compute its AUC score on the test dataset, and output the result. Generate and visualize a confusion matrix, analogous to subtask R4a).
+
+**Solution:**
+
+The `hstats` package detects interactions using H-statistics, which measure how much **the effect of one variable depends on another** in the model’s predictions. Specifically, it compares the model's **joint prediction function** for two variables with the **sum of their individual effects**. If the joint effect differs significantly from the sum of individual effects, the variables are said to interact. An H-statistic close to 1 indicates a strong interaction, while a value near 0 suggests little to no interaction.
+
+```{r interaction_hstats, message=FALSE, warning=FALSE}
+# Compute H-statistics for interaction effects
+# here the seed set for the sampling of training data
+set.seed(seed)
+suppressMessages(
+  suppressWarnings(
+    h_interactions <- hstats(
+      object = xgb,
+      X = xgb_train$dat_x,
+      fun = predict,
+      type = "interaction", 
+      n_max = 5000, # About 10 % of the training data
+    )))
+
+# Print interaction summary
+print(h_interactions)
+```
+
+```{r split=FALSE, fig.align='center', fig.width=10, warning=FALSE, fig.cap="Fig. 29", out.width="100%"}
+# Plot top interactions
+plot(h_interactions)
+```
+
+This shows pairwise interaction strengths for your predictors. The higher the value (closer to 1), the stronger the interaction between those variables.
+
+To check whether interactions generalize well, we compute interaction structure on the test dataset to assess stability.
+
+```{r interaction_hstats_on_testset, message=FALSE, warning=FALSE}
+# Compute H-statistics on test datasets
+suppressMessages(
+  suppressWarnings(
+    h_interactions <- hstats(
+      object = xgb,
+      X = xgb_test$dat_x,
+      fun = predict,
+      type = "interaction", 
+      n_max = nrow(xgb_test$dat_x),
+    )))
+```
+
+```{r split=FALSE, fig.align='center', fig.width=10, warning=FALSE, fig.cap="Fig. 30", out.width="100%"}
+# Plot top interactions
+plot(h_interactions)
+```
+
+We now select the three most significant interactions from the plot above that do not involve `diag_1`, `diag_2`, or `diag_3`, and incorporate them into the logistic regression model.
+ 
+```{r}
+# Step 1: Define the formula with three desired interactions
+formula <- TARGET ~ . + admission_type_id:number_inpatient + 
+    discharge_disposition_id:number_inpatient + 
+    admission_type_id:time_in_hospital
+
+# Step 2: Build design matrix
+mm <- model.matrix(formula, data = train)
+  
+# Step 3: Find and remove linearly dependent columns
+lc <- findLinearCombos(mm)
+
+if (length(lc$remove) > 0) {
+  mm_clean <- mm[, -lc$remove]
+} else {
+  mm_clean <- mm
+}
+rm(mm)
+
+# Step 4: Fit the logistic regression model using caret
+set.seed(seed)
+logit_with_interaction <- train(
+  x = mm_clean[, -1],
+  y = train$TARGET,
+  method = "glm",
+  family = "binomial",
+  trControl = ctrl,
+  metric = "ROC"
+)
+```
+
+```{r}
+# Print model summary
+summary(logit_with_interaction)
+```
+
+We compute then the AUC score on the test dataset converted to its associated model matrix.
+
+```{r}
+mm_test <- model.matrix(formula, data = test)[, -lc$remove]
+
+# Predict probabilities
+log_with_int_probs <- predict(logit_with_interaction, newdata = mm_test, type = "prob")[, "X1"]
+
+# Compute AUC
+auc_log_with_int <- AUC(y_pred = log_with_int_probs, y_true = as.numeric(test$TARGET) - 1)
+cat("Test AUC (Logistic Regression with Interactions):", auc_log_with_int, "\n")
+```
+
+Lastly, we generate and visualize the confusion matrix using a threshold of 0.2.
+
+```{r}
+# Apply custom threshold and relabel back the levels of the TARGET
+threshold <- 0.2
+pred_classes <- factor(ifelse(log_probs > threshold, "1", "0"), levels = c("1", "0"))
+actual_classes <- factor(test$TARGET, levels = c("X1", "X0"), labels = c("1", "0"))
+
+# Create confusion matrix
+conf_matrix <- confusionMatrix(pred_classes, actual_classes, positive = "1")
+```
+
+```{r split=FALSE, fig.align='center', warning=FALSE, fig.cap="Fig. 31", out.width="100%"}
+# Visualize confusion matrix
+visualize_cm(conf_matrix)
+
+# Print confusion matrix
+print(conf_matrix)
+```
+
+## c) Model Comparison and Discussion: 
+
+Compare the results of the Logistic Regressions without and with interactions. Discuss whether including interactions led to a significant improvement in model performance. Additionally, briefly discuss three approaches to integrating interactions differently or more effectively to further improve model quality.
+
+**Solution:**
+
+Comparing the AUC of 0.6872 for the baseline model (without interactions) to 0.6876 for the model with interactions, the increase of ~0.0004 (or 0.06 percentage points) is marginal. This small improvement is unlikely to be statistically significant without rigorous validation, such as bootstrapping or formal hypothesis testing. In conclusion, including these interaction terms provides limited benefit in predictive power in this case, and the added model complexity does not yield a substantial performance gain.
+
+<b>Three approaches to integrate interactions more effectively</b>:
+
+1. **Data-driven interaction discovery**: Use algorithms (e.g., hstats) to identify only the most informative interactions, those that contribute significant mutual dependence with the outcome, instead of including all possible pairs.
+
+2. **Feature engineering based on domain knowledge**: Instead of adding all pairwise interactions, construct specific, meaningful combinations grounded in clinical reasoning. For example, `discharge_disposition_id * time_in_hospital` may capture complexity around post-discharge care. This promotes interpretability and robustness.
+
+3. **Nonlinear models or hybrid approaches**: When logistic regression fails to capture complex dependencies, consider simple nonlinear models such as Generalized Additive Models (GAMs), which allow for smooth, nonlinear effects and interactions.
+
+# Task R5: Regularized Linear Models and GAMs
+
+In this task, you will apply regularized linear models (L1 and L2 regularization) as well as Generalized Additive Models (GAMs) for modelling. The training and test datasets prepared in subtask R3a) will serve as input data. In all subtasks, use the same set of predictors as in subtask R4a).
+
+## a) L1 Regularization (LASSO)
+
+Apply the LASSO method (L1 regularization) to the training data. Determine the optimal regularization parameter $λ$ using cross-validation, visualize the regularization path, and output all non-zero coefficients. Briefly discuss three possible relationships between the non-zero coefficients of the LASSO model and the insights gained from the EDA in Task R2. Compute the AUC score of the model on the test data.
+
+**Solution:**
+
+Note that we can use `caret` to train a L1-regularized linear model as follows:
+
+```{r}
+# Set tuning grid for LASSO (alpha = 1 corresponds to LASSO; alpha = 0 would be Ridge)
+tune_grid <- expand.grid(
+  alpha = 1,                                 # Use LASSO regularization
+  lambda = 10^seq(-10, 0, length.out = 100)  # Logarithmic grid of λ values
+)
+
+# Set up train control with 5-fold cross validation
+ctrl <- trainControl(
+  method = "cv", # cross-validation
+  number = 5,
+  classProbs = TRUE, # Needed to compute probabilities for ROC
+  summaryFunction = twoClassSummary # To use AUC
+)
+
+# Train LASSO model using caret
+set.seed(seed)
+lasso <- train(
+  TARGET ~ ., 
+  data = train,
+  method = "glmnet",
+  trControl = ctrl,
+  metric = "ROC",
+  tuneGrid = tune_grid
+)
+```
+
+However, `caret` does not provide a direct way to plot the LASSO regularization path like `plot(fit_glmnet, xvar = "lambda")` does, we hereby switch to using `glmnet` instead. Furthermore, we don't have to specify the range of lambda to search over.
+
+#### Step 1: Prepare the data matrices
+Since `glmnet` requires a numeric model matrix, some preprocessing is necessary.
+
+```{r}
+# Create model matrices (exclude intercept)
+mm_train <- model.matrix(TARGET ~ ., train)[, -1]
+mm_valid <- model.matrix(TARGET ~ ., valid)[, -1]
+mm_test <- model.matrix(TARGET ~ ., test)[, -1]
+```
+
+#### Step 2:  Apply LASSO with cross-validation
+
+We determine the optimal regularization parameter $λ$ using cross-validation.
+
+```{r }
+# Hyperparameter tuning for LASSO via cross-validation
+set.seed(seed)
+cv_lasso <- cv.glmnet(
+  x = mm_train, 
+  y = train$TARGET, 
+  family = "binomial", 
+  alpha = 1, # LASSO
+  type.measure = "auc" # AUC as evaluation metric
+  # nfolds = 10
+)
+```
+
+```{r fig.align='center', warning=FALSE, fig.cap="Fig. 32", out.width="100%"}
+# Visualise cross-validated AUC vs. log(lambda)
+plot(cv_lasso)
+```
+
+```{r}
+# Optimal regularization paramter λ
+best_lambda <- cv_lasso$lambda.min
+cat("Optimal regularization paramter λ:", best_lambda, "\n")
+```
+
+#### Step 3: Visualize regularization path
+
+```{r fig.align='center', warning=FALSE, fig.cap="Fig. 33", out.width="100%"}
+# Coefficient path (from original glmnet fit)
+lasso <- glmnet(
+  x = mm_train, 
+  y = train$TARGET, 
+  family = "binomial", 
+  alpha = 1, # LASSO
+)
+
+# Visualize regularization path
+plot(lasso, xvar = "lambda", label = TRUE)
+```
+
+#### Step 4: Extract non-zero coefficients
+
+```{r}
+coef_best <- coef(cv_lasso, s = "lambda.min")
+
+data.frame(
+  Feature = rownames(coef_best)[which(coef_best != 0)],
+  Coefficient = coef_best[coef_best != 0]
+)
+```
+
+<b>Three possible relationships between the non-zero coefficients of the LASSO model and the key insights gained from the EDA</b>:
+
+1. **Significant feature correlation**: Features with higher absolute correlation to the target in EDA such as `number_inpatient` often remain in the model. Their inclusion suggests consistency between univariate analysis and multivariate regularized modeling.
+
+2. **Interaction with categorical variables**: Categorical predictors such as `discharge_disposition_id` that showed class imbalance or strong differences in readmission rates in EDA may remain active, confirming their discriminatory power when controlling for others.
+
+3. **Collinearity resolution**: LASSO tends to select one feature from a group of correlated variables. If EDA showed high collinearity (e.g., between `change` and `diabetesMed`), LASSO's sparsity helps resolve this by shrinking some to zero.
+
+#### Step 5: Predict and compute AUC on test data
+
+```{r}
+lasso_probs <- predict(cv_lasso, newx = mm_test, s = "lambda.min", type = "response")
+auc_lasso <- AUC(y_pred = lasso_probs, y_true = as.numeric(test$TARGET) - 1)
+cat("Test AUC (Lasso):", round(auc_lasso, 4), "\n")
+```
+
+## b) L2 Regularization (Ridge Regression)
+
+Apply the Ridge Regression method (L2 regularization) to the training data. Determine the optimal regularization parameter $λ$ using cross-validation and visualize the regularization path. Compute the AUC score of the model on the test data.
+
+**Solution:**
+
+We continue with the data prepared in the last session. 
+
+#### Step 1: Train ridge regression with cross-validation
+
+```{r}
+# Hyperparameter tuning for Ridge via cross-validation
+set.seed(seed)
+cv_ridge <- cv.glmnet(
+  x = mm_train, 
+  y = train$TARGET, 
+  family = "binomial", 
+  alpha = 0, # Ridge
+  type.measure = "auc" # AUC as evaluation metric
+  # nfolds = 10
+)
+```
+
+```{r fig.align='center', warning=FALSE, fig.cap="Fig. 34", out.width="100%"}
+# Visualise cross-validated AUC vs. log(lambda)
+plot(cv_ridge)
+```
+
+```{r}
+# Optimal regularization paramter λ
+best_lambda <- cv_ridge$lambda.min
+cat("Optimal regularization paramter λ:", best_lambda, "\n")
+```
+
+#### Step 2: Visualize regularization path
+
+```{r fig.align='center', warning=FALSE, fig.cap="Fig. 35", out.width="100%"}
+# Coefficient path (from original glmnet fit)
+ridge <- glmnet(
+  x = mm_train, 
+  y = train$TARGET, 
+  family = "binomial", 
+  alpha = 0, # Ridge
+)
+
+plot(ridge, xvar = "lambda", label = TRUE)
+```
+
+#### Step 3: Predict and compute AUC on test data
+
+```{r}
+ridge_probs <- predict(cv_ridge, newx = mm_test, s = "lambda.min", type = "response")
+auc_ridge <- AUC(y_pred = ridge_probs, y_true = as.numeric(test$TARGET) - 1)
+cat("Test AUC (Ridge):", round(auc_ridge, 4), "\n")
+```
+
+## c) Generalized Additive Model (GAM)
+
+Train a Generalized Additive Model (GAM) on the training data, for example using the `mgcv` package. Design the GAM such that the AUC score achieved of this model on the test data is higher than that of the Logistic Regression model from Task R4a). Explain how the plots and curve patterns from Task R2 help identify relevant features for constructing a suitable GAM, taking into account effects that were overlooked in the previous task parts. Specify the corresponding feature candidates and visualize the estimated effects of two of these features, which have been identified as particularly promising for the GAM. Compute the AUC score of the model on the test data.
+
+**Solution:**
+
+#### Step 1: Feature selection justification from EDA
+
+From earlier exploratory data analysis (EDA), we observed that features such as `number_inpatient`, `num_lab_procedures`, and `num_medications` exhibit non-linear relationships with the target variable (TARGET). For instance, these features show that higher values are associated with increased readmission risk, but the trends are not strictly linear; they often show plateauing or threshold effects rather than a constant increase.
+
+Such non-linear patterns are poorly captured by standard logistic regression, which assumes a linear relationship between the predictors and the log-odds of the outcome. To better model these complexities, we incorporate smooth terms for these features in a Generalized Additive Model (GAM). This allows us to flexibly capture non-linear effects without manually engineering transformations.
+
+#### Step 2: Fit a GAM model Using `mgcv`
+
+```{r}
+set.seed(seed)
+# Fit GAM with smooth terms for selected features
+gam <- gam(
+  TARGET ~ race + age + weight + admission_type_id + 
+    discharge_disposition_id + admission_source_id +
+    time_in_hospital + payer_code +
+    medical_specialty + s(num_lab_procedures) + 
+    num_procedures + s(num_medications) +
+    number_outpatient + number_emergency +
+    s(number_inpatient) + number_diagnoses + A1Cresult +
+    metformin + insulin + diabetesMed + 
+    group_diag_1 + group_diag_2 + group_diag_3,
+  data = train,
+  family = binomial(link = "logit")
+)
+```
+
+```{r}
+# Print model summary
+summary(gam)
+```
+
+#### Step 3: Visualize the estimated non-linear effects
+
+```{r fig.align='center', fig.width=11, warning=FALSE, fig.cap="Fig. 36", out.width="100%"}
+par(mfrow = c(1, 2))
+plot(gam, select = 3, main = "Effect of Number of Inpatient Visits on Readmission")
+plot(gam, select = 2, main = "Effect of Number of Medications on Readmission")
+```
+
+These plots illustrate how the log-odds of readmission vary smoothly with each variable, uncovering S-shaped or polynomial-like patterns that suggest non-linear effects.
+
+#### Step 4: Predict and compute AUC on test set
+
+```{r}
+# Predict probabilities
+gam_pred <- predict(gam, newdata = test, type = "response")
+
+# Compute AUC
+auc_gam <- AUC(y_pred = gam_pred, y_true = as.numeric(test$TARGET) - 1)
+cat("Test AUC (GAM):", round(auc_gam, 4), "\n")
+```
+
+## d) Comparison and discussion
+
+Compare the model performance of the following approaches:
+– Logistic Regression without interactions from subtask R4a)
+– Logistic Regression with interactions from subtask R4b)
+– LASSO model from subtask R5a)
+– Ridge Regression from subtask R5b)
+– Generalized Additive Model from subtask R5c)
+
+Discuss which of these models is best suited for the given prediction task and provide a justified explanation for your choice.
+
+**Solution:**
+
+In comparison of model performance, here are the AUC scores for each of the models:
+
+- Logistic Regression without interactions: AUC = `r auc_log`;
+- Logistic Regression with interactions: AUC = `r auc_log_with_int`;
+- LASSO Model: AUC = `r auc_lasso`;
+- Ridge Regression: AUC = `r auc_ridge`;
+- Generalized Additive Model (GAM): AUC = `r auc_gam`.
+
+<u>**Model Performance Discussion**</u>
+
+To assess which model is best suited for predicting hospital readmission rates, we need to consider the following aspects:
+
+1. **AUC Score**:
+    * The AUC (Area Under the Curve) score represents the model's ability to distinguish between classes (in this case, whether a patient will be readmitted or not). A higher AUC score indicates a better model.
+    * GAM has the highest AUC (`r auc_gam`), followed closely by LASSO (`r auc_lasso`), Ridge Regression (`r auc_ridge`), and both Logistic Regression with interactions (`r auc_log_with_int`) and without interactions (`r auc_log`).
+
+2. **Model complexity and interpretability**:
+    * Logistic Regression (with or without interactions) is simple to interpret. The coefficients can give insight into the relationship between the features and the outcome. Logistic regression without interactions is particularly easy to interpret but might miss complex relationships between features.
+    * Logistic Regression with interactions allows for a better understanding of interactions between variables, which is important when features have complex, non-linear relationships. However, it increases complexity slightly.
+    * LASSO and Ridge Regression are both regularization techniques, which reduce overfitting by penalizing large coefficients. LASSO can perform variable selection by shrinking some coefficients to zero, making it easier to identify important features. Ridge regression, on the other hand, shrinks the coefficients but does not set any of them to zero.
+    * Generalized Additive Models (GAM) allow for more flexible relationships between the predictors and the target variable, as they model non-linear effects. However, GAMs are more complex to interpret compared to logistic regression models.
+
+Which model is best suited for predicting hospital readmission rate?
+
+* LASSO appears to be the best model for predicting hospital readmission rates based on the AUC score (`r auc_lasso`) and its ability to perform automatic feature selection, which is especially useful in a healthcare context where certain features may be irrelevant or redundant.
+
+* While GAM performs with the best AUC and offers flexibility in modeling non-linear relationships, its complexity and lower interpretability make it less ideal for practical implementation compared to LASSO.
+
+* Logistic regression is a close contender but still lags behind LASSO in performance and doesn’t offer the same regularization and feature selection advantages. Ridge regression has a slightly lower AUC than LASSO and doesn't perform feature selection, making it less desirable.
+
+# Task R6: Ternary Classification
+
+In this task, you will apply the machine learning models Multinomial Logistic Regression and XGBoost for ternary classification. The training, validation, and test datasets based on `diabetic_data_ter`, prepared in subtask R3a), will serve as input data.
+
+## a) Evaluation Metrics for Binary and Ternary Classification: 
+
+First, explain whether and why the AUC evaluation metric used so far is well suited for binary classification. Briefly discuss two advantages and disadvantages of AUC compared to Accuracy. Describe the key considerations when evaluating multiclass classification models. Discuss the evaluation metrics Accuracy, Balanced Accuracy, and Macro-F1 Score, and explain in which situation each of these is particularly useful. Implement a function that computes these three metrics and outputs them in a concise format.
+
+**Solution:**
+
+#### 1. AUC for binary classification
+
+AUC (Area Under the Receiver Operating Characteristic Curve) is a widely used metric for binary classification tasks. It measures the model's ability to distinguish between the two classes (e.g., readmission vs. no readmission) across different classification thresholds.
+
+<b>Why AUC is well-suited for binary classification</b>:
+
+  * Measures discrimination ability: AUC reflects the probability that the classifier ranks a randomly chosen positive instance higher than a randomly chosen negative one. This is especially valuable in binary classification tasks like fraud detection or medical diagnosis, where the goal is to separate the positive and negative classes effectively.
+
+  * Threshold independence: AUC evaluates the model’s performance across all possible classification thresholds, not just a single point like accuracy does (e.g., threshold = 0.5). This is useful when the optimal threshold isn't known in advance (especially in imbalanced datasets) or when the costs of false positives vs. false negatives differ.
+
+  * Robustness to class imbalance: In imbalanced datasets (common in binary classification), accuracy can be misleading (e.g., 95% accuracy by always predicting the majority class). AUC remains meaningful even when the class distribution is skewed, making it more reliable for evaluating model quality.
+
+#### 2. Advantages and disadvantages of AUC vs. Accuracy
+
+**Advantages of AUC**:
+
+  - Robust to class imbalance: AUC evaluates the model's ability to distinguish resp. rank between classes regardless of their frequency. Accuracy, on the other hand, can be misleading when one class dominates (e.g., predicting the majority class yields high accuracy but poor actual performance).
+
+  - Threshold-independent: AUC evaluates the model’s performance across all possible decision thresholds, so it is not dependent on selecting a specific threshold (such as 0.5 in binary classification). This makes AUC a more robust and generalizable evaluation metric.
+
+**Disadvantages of AUC**:
+
+  - Harder to interpret: AUC is a more abstract concept than accuracy. While accuracy tells you the percentage of correct predictions, AUC reflects performance across threshold levels, which can be less intuitive for stakeholders.
+
+  - Ignores actual operating point: AUC does not reflect model performance at a specific decision threshold. If you care about performance at a particular threshold (e.g., 0.5), accuracy or metrics like precision/recall are more relevant.
+
+#### 3. Key Considerations for evaluating multiclass classification models
+
+In multiclass classification, the model needs to distinguish among three or more classes (e.g., different medical conditions or diagnoses). Evaluating these models is more complex than binary classification, and different metrics are required.
+
+**Key considerations**:
+
+  - Class imbalance: Like in binary classification, classes may be imbalanced, which can affect model performance. A naive classifier may achieve high accuracy by favoring majority classes, while performing poorly on minority ones. A solution is to use metrics like balanced accuracy, macro-averaged F1, or per-class recall to account for this.
+
+  - Multiple metrics: Instead of just focusing on accuracy, we must consider other metrics that can provide a clearer picture of how well the model is doing for **each individual class**.
+
+  - Averaging methods: Metrics such as precision, recall, and F1 can be averaged in different ways:
+    * Macro averaging: Treats all classes equally, regardless of support (size). Good for imbalanced datasets when every class matters.
+    * Micro averaging: Aggregates over all instances, favouring performance on common classes.
+    * Weighted averaging: Weights each class’s metric by its frequency in the dataset.
+    
+
+  - Interpretability: Global accuracy is simple but may not explain model behavior for individual classes. Reporting per-class performance gives insight into which classes the model struggles with.
+
+  - Confusion Matrix: Useful for visualizing the distribution of prediction errors across classes. Helps identify specific classes that are being confused with others.
+
+  - Domain-Specific costs: Misclassification may have different consequences depending on the class (e.g., misdiagnosing a disease vs. a healthy case). In such cases, cost-sensitive evaluation or custom scoring rules may be needed.
+
+##### 4. Explanation of Evaluation Metrics
+
+**Accuracy**:
+
+ - Accuracy measures the proportion of correctly classified instances out of all instances. However, it can be misleading if the classes are imbalanced.
+
+\[
+\text{Accuracy} = \frac{\text{Number of Correct Predictions}}{\text{Total Number of Predictions}}
+\]
+
+ - **Use case**: Accuracy is useful when the classes are balanced and misclassification costs are roughly equal.
+
+
+**Balanced Accuracy**:
+
+ - Balanced Accuracy is calculated as the average recall (true positive rate) across all classes:
+
+\[
+\text{Balanced Accuracy} = \frac{1}{N} \sum_{i=1}^{N} \text{Recall}_i
+\]
+where \(N\) is the number of classes.
+
+ - **Use case**: This metric is useful for imbalanced datasets, as it gives equal importance to each class regardless of its frequency.
+ 
+
+**Macro-F1 Score**:
+
+ - The F1 score is the harmonic mean of precision and recall, which balances precision and recall. The **Macro-F1 Score** is the average F1 score over all classes:
+
+\[
+\text{Macro-F1} = \frac{1}{N} \sum_{i=1}^{N} \text{F1}_i
+\]
+
+where:
+
+\[
+\text{F1}_i = 2 \cdot \frac{\text{Precision}_i \cdot \text{Recall}_i}{\text{Precision}_i + \text{Recall}_i}
+\]
+
+and \(N\) is the number of classes.
+
+- **Use case**: Macro-F1 is especially useful when all classes should be treated equally, as well as where balancing false positives and false negatives across all classes is of interest.
+
+##### 5. Implementing a Function for Accuracy, Balanced Accuracy, and Macro-F1 Score
+
+Now we implement a function that computes Accuracy, Balanced Accuracy, and Macro-F1 Score:
+
+```{r}
+# Function to compute Accuracy, Balanced Accuracy, and Macro-F1 Score
+compute_metrics <- function(y_pred, y_true) {
+  
+  # Confusion matrix
+  cm <- confusionMatrix(y_pred, y_true)
+  
+  # Accuracy
+  accuracy <- cm$overall['Accuracy']
+  
+  # Balanced Accuracy
+  balanced_accuracy <- mean(cm$byClass[, 'Balanced Accuracy'])
+  
+  # Macro-F1 Score
+  macro_f1 <- mean(cm$byClass[, 'F1'])
+  
+  # Output in a concise format
+  result <- data.frame(
+    Accuracy = accuracy,
+    Balanced_Accuracy = balanced_accuracy, 
+    Macro_F1_Score = macro_f1)
+  
+  return(result)
+}
+```
+
+## b) Ternary Classification with Multinomial Logistic Regression
+
+Train a Multinomial Logistic Regression model (e.g., using the `multinom` function from the `nnet` package) on the training dataset. Select only features that have at least two distinct values, and exclude the target variable as well as the diagnosis columns (`diag_1`, `diag_2`, `diag_3`). Optimize the class thresholds to ensure that the predicted class distribution closely matches the actual distribution of TARGET. Evaluate the model’s performance on the test dataset using
+the optimized thresholds and the function from subtask R6a). Additionally, generate and interpret an appropriate confusion matrix that compares the model’s predictions with the actual values in the test data.
+
+**Solution:**
+
+#### Step 1: Data preprocessing
+```{r}
+train_ter <- feature_selection(diabetic_data_ter_splitted$train)
+valid_ter <- feature_selection(diabetic_data_ter_splitted$valid)
+test_ter <- feature_selection(diabetic_data_ter_splitted$test)
+```
+
+#### Step 2: Train the multinomial logistic regression model
+```{r}
+multinom <- nnet::multinom(TARGET ~ ., data = train_ter)
+```
+
+#### Step 3: Obtain predicted and actual class distributions on the validation dataset to tune the classification thresholds
+
+```{r}
+# Probabilities for each class
+multinom_probs <- predict(multinom, newdata = valid_ter, type = "probs")
+
+# Actual distribution
+actual_dist <- prop.table(table(valid_ter$TARGET))
+```
+
+Here `multinom_probs` is a matrix where each column is a class and each row is a sample.
+
+#### Step 4: Optimize class thresholds using weighting
+
+Threshold optimization helps mitigate bias toward the majority class. This is particularly useful in imbalanced multiclass classification, as is the case here. Adjusting class thresholds post-prediction can improve performance by aligning predicted class proportions with observed class frequencies. This method is most effective when the predicted class probabilities are well-calibrated.
+
+For a multinomial logistic regression model with three classes, optimizing thresholds involves adjusting decision boundaries such that the predicted class distribution better reflects the actual class distribution in the validation set.
+
+To achieve this, we implement a function that finds optimal class-specific thresholds. One practical approach is to apply class weights that scale predicted probabilities, shifting the decision rule accordingly.
+
+```{r}
+# Get predicted classes under default max-prob rule
+default_pred <- apply(multinom_probs, 1, which.max)
+
+# Get class names
+class_names <- colnames(multinom_probs)
+
+# Function to assign class using weighted probabilities
+assign_weighted_class <- function(probs, weights) {
+  weighted_probs <- t(t(probs) * weights)
+  factor(apply(weighted_probs, 1, function(x) class_names[which.max(x)]), 
+         levels = levels(train_ter$TARGET))
+}
+
+# Grid search for weights that bring predicted distribution closer to actual
+grid <- expand.grid(w1 = seq(0.1, 1.5, 0.1),
+                    w2 = seq(0.1, 1.5, 0.1),
+                    w3 = seq(0.1, 1.5, 0.1))
+
+grid$distance <- NA
+
+for (i in 1:nrow(grid)) {
+  w <- as.numeric(grid[i, 1:3])
+  preds <- assign_weighted_class(multinom_probs, w)
+  dist <- sum((prop.table(table(preds)) - actual_dist)^2)
+  grid$distance[i] <- dist
+}
+
+# Best weights
+best_weights <- as.numeric(grid[which.min(grid$distance), 1:3])
+names(best_weights) <- class_names
+print(best_weights)
+```
+
+#### Step 5: Evaluate the model's performance on the test dataset
+
+```{r}
+# Predict classes using optimized thresholds
+pred_probs <- predict(multinom, newdata = test_ter, type = "probs")
+pred_classes <- assign_weighted_class(pred_probs, best_weights)
+
+# Evaluate the model's performance via the computed metrics
+compute_metrics(test_ter$TARGET, pred_classes)
+```
+
+#### Step 6: Generate and interpret confusion matrix
+
+```{r}
+# Create and print confusion matrix
+confusionMatrix(pred_classes, test_ter$TARGET)
+```
+
+<u><b>Key metrics summary</b></u>
+
+1. **Overall performance**:
+    - Accuracy: 0.5566 → 55.66% of all predictions are correct.
+    - Kappa: 0.1769 → Suggests only slight agreement beyond chance.
+    - P-value [Acc > NIR]: 1.0 → Model does not significantly outperform guessing the majority class ("NO").
+
+2. **Class: NO**:
+    - High sensitivity (67.2%) → captures most actual NO cases. 
+    - But specificity is low (53.4%) → many false positives (non-NO predicted as NO).
+    - Precision is decent (67.7%) → predicted NO is correct 2/3 of the time.
+
+3. **Class: <30**:
+    - Extremely low sensitivity (17.5%) → model misses most true <30 cases.
+    - High specificity (93.0%) → model avoids false alarms well.
+    - Precision (19.8%) → among the few predictions as <30, only ~20% are correct.
+
+4. **Class: >30**:
+    - Moderate sensitivity (44.9%) → detects ~45% of actual >30 cases.
+    - Specificity (72%) is acceptable.
+    - Precision (42.9%) is better than <30, but still shows room for improvement.
+
+We observe an imbalanced prediction bias: most predictions fall into the majority classes (NO or >30), while the <30 class is poorly predicted, exhibiting low recall and precision, even when using the optimal threshold.
+
+## c) Ternary Classification with XGBoost
+
+Train an XGBoost model, analogous to subtask R3b). Optimize the class thresholds to ensure that the predicted class distribution closely matches the actual distribution of TARGET. Evaluate the model’s performance on the test dataset using the optimized thresholds and the function from subtask R6a). Additionally, generate and interpret an appropriate confusion matrix that compares the model’s predictions with the actual values in the test data. Compare the results with those from subtask R6b) and discuss which model (Multinomial Logistic Regression or XGBoost) is better suited for this problem, based on model performance and the confusion matrix.
+
+**Solution:**
+
+#### Step 1: Prepare the data
+
+In order for *XGBoost* to properly ingest our data samples we need to re-format them slightly:
+
+```{r}
+# Feature formatting
+xgb_train <- process_data_for_xgboost(diabetic_data_ter_splitted$train)
+xgb_valid <- process_data_for_xgboost(diabetic_data_ter_splitted$valid)
+xgb_test <- process_data_for_xgboost(diabetic_data_ter_splitted$test)
+
+dtrain <- xgb.DMatrix(xgb_train$dat_x,label = xgb_train$dat_y)
+dvalid <- xgb.DMatrix(xgb_valid$dat_x,label = xgb_valid$dat_y)
+dtest <- xgb.DMatrix(xgb_test$dat_x)
+```
+
+#### Step 2: Define hyperparameter grid
+
+We specify the grid of hyperparameters to search over. Again this and the next steps are commented out in subsequent runs after identifying the best parameters in the initial run, in order to save compilation time when knitting the report to HTML.
+
+```{r}
+# # Define hyperparameter grid
+# xgb_grid <- expand.grid(
+#   colsample_bytree = c(0.6, 0.8, 1.0),
+#   subsample = c(0.6, 0.8, 1.0),
+#   max_depth = c(3, 5, 7),
+#   eta = c(0.01, 0.1, 0.5)
+# )
+# 
+# # Randomly sample 30 parameter combinations
+# set.seed(seed)
+# xgb_grid <- xgb_grid[sample(nrow(xgb_grid), 30), ]
+```
+
+#### Step 3: Perform cross-validation
+
+For each combination of hyperparameters, we use `xgb.cv` to perform a 5-fold cross-validation (CV) step to measure our model's performance.
+
+```{r}
+# # Initialize progress bar and set the seed
+# pb <- txtProgressBar(min = 0, max = nrow(xgb_grid), style = 3)
+# set.seed(seed)
+# 
+# # Loop over each combination of hyperparameters
+# for (i in 1:nrow(xgb_grid)) {
+#   # Set XGBoost parameters
+#   xgb_params <- list(colsample_bytree = xgb_grid$colsample_bytree[i], # variables per tree
+#                    subsample = xgb_grid$subsample[i], # data subset per tree
+#                    booster = "gbtree",
+#                    max_depth = xgb_grid$max_depth[i], # tree levels
+#                    eta = xgb_grid$eta[i], # shrinkage
+#                    objective = "multi:softprob",
+#                    eval_metric = "mlogloss",
+#                    num_class = 3)
+# 
+#   xgb_cv <- xgb.cv(xgb_params,
+#                    dtrain,
+#                    nrounds = 200,
+#                    nfold = 5,
+#                    verbose = FALSE,
+#                    early_stopping_rounds = 5)
+# 
+#   # Get the auc score
+#   xgb_grid$mlogloss[i] <- min(xgb_cv$evaluation_log$test_mlogloss_mean)
+# 
+#   # Update progress bar
+#   setTxtProgressBar(pb, i)
+# }
+# 
+# # Close progress bar
+# close(pb)
+# 
+# # Store the best parameters
+# best_params <- xgb_grid[which.min(xgb_grid$mlogloss), ]
+```
+
+
+#### Step 4: Train the final model
+
+Having found the best parameters and features during cross-validation, we can now train our classifier.
+
+```{r}
+# The best hyperparameters found in the initial run
+best_params <- data.frame(colsample_bytree = 0.6, 
+                          subsample = 0.8, 
+                          max_depth = 7, 
+                          eta = 0.1)
+# Set XGBoost parameters
+xgb_params <- list(colsample_bytree = best_params$colsample_bytree, # variables per tree
+                   subsample = best_params$subsample, # data subset per tree
+                   booster = "gbtree",
+                   max_depth = best_params$max_depth, # tree levels
+                   eta = best_params$eta, # shrinkage
+                   objective = "multi:softprob",
+                   eval_metric = "mlogloss",
+                   num_class = 3
+                   )
+
+# Define watchlist to monitor training and validation error
+watchlist <- list(train = dtrain, valid = dvalid)
+
+# Train the XGBoost
+set.seed(seed)
+xgb <- xgb.train(params = xgb_params,
+                 data = dtrain, 
+                 print_every_n = 5,
+                 watchlist = watchlist, 
+                 nrounds = 120,
+                 early_stopping_rounds = 5)
+```
+#### Step 5: Predict class probabilities on validation data for class threshold optimization later
+
+```{r}
+pred_probs <- predict(xgb, dvalid)
+pred_matrix <- matrix(pred_probs, ncol = 3, byrow = TRUE)
+
+# Actual validation class distribution
+actual_dist <- prop.table(table(xgb_valid$dat_y))
+```
+
+#### Step 6: Optimize class thresholds
+
+This step finds the optimal class thresholds so predicted class frequencies match actual frequencies.
+
+```{r}
+threshold_opt <- function(thresholds, probs, actual_dist) {
+  pred_class <- apply(probs, 1, function(p) {
+    if (p[1] >= thresholds[1]) return(0)
+    else if (p[2] >= thresholds[2]) return(1)
+    else return(2)
+  })
+  pred_dist <- prop.table(table(factor(pred_class, levels = 0:2)))
+  sum((pred_dist - actual_dist)^2)  # L2 norm between distributions
+}
+
+set.seed(seed)
+# Initial thresholds
+init_thresh <- c(0.6, 0.3)
+opt_res <- optim(init_thresh, 
+                 threshold_opt, probs = pred_matrix, actual_dist = actual_dist,
+                 method = "L-BFGS-B", lower = c(0.01, 0.01), upper = c(0.99, 0.99))
+
+best_thresh <- opt_res$par
+```
+
+#### Step 7: Evaluate the model's performance on the test dataset
+
+```{r}
+# Predict probabilities on test data
+test_probs <- predict(xgb, dtest)
+test_matrix <- matrix(test_probs, ncol = 3, byrow = TRUE)
+
+# Predict classes using optimized thresholds
+test_pred <- apply(test_matrix, 1, function(p) {
+  if (p[1] >= best_thresh[1]) return(0)
+  else if (p[2] >= best_thresh[2]) return(1)
+  else return(2)
+})
+
+# Evaluate the model's performance via the computed metrics
+compute_metrics(factor(xgb_test$dat_y, levels = 0:2), 
+                factor(test_pred, levels = 0:2))
+```
+
+```{r}
+# Generarate confusion matrix
+confusionMatrix(
+  factor(test_pred, levels = 0:2), 
+  factor(xgb_test$dat_y, levels = 0:2))
+```
+
+<u>**Key observations**</u>
+
+ - **Class 0 ("No readmission")**:
+    * High sensitivity (0.73): the model correctly identifies most patients who will not be readmitted.
+    * But specificity is low (0.51), meaning it often misclassifies readmitted patients as "no readmission".
+
+ - **Class 1 ("<30 days")**:
+    * Very poor sensitivity (0.053): only ~5% of actual "<30" readmissions are detected.
+    * However, excellent specificity (0.99): almost no non-"<30" patients are incorrectly flagged.
+
+ - **Class 2 (">30 days")**:
+    * Balanced performance: sensitivity (0.50), specificity (0.71), balanced accuracy (0.60).
+    * Better than Class 1 but still far from ideal.
+
+<u>**Summary of Model Performance Comparison**</u>
+
+For the task of equally differentiating between the three readmission classes, **no readmission**, **readmission within 30 days**, and **readmission after 30 days**, XGBoost is generally better suited due to:
+
+ - Slightly higher overall and balanced accuracy;
+ - Improved precision (positive predictive value) across all classes;
+ - Greater robustness in identifying the ">30 days" class
+
+However, there is a critical limitation:
+
+ - Both models perform poorly on Class 1 ("<30 days"), which represents the most clinically significant group for early intervention.
+ - XGBoost in particular shows notably low sensitivity for this class (5.3% vs. 17.5% for Multinomial Logistic Regression).
+
+Given that accurately detecting readmission within 30 days is the primary goal, Multinomial Logistic Regression emerges as the more appropriate model, despite its lower overall accuracy.
+
+## d) One-vs-One
+
+Another way to evaluate the model is by calculating the AUC score per class, using a pairwise (One-vs-One) approach. Perform a One-vs-One analysis for the Multinomial Logistic Regression model from subtask R6b), where each possible pair of classes in TARGET is treated as a separate binary classification problem, and compute the AUC score for each pair using the test data. Compare and interpret the One-vs-One results, both among themselves and in relation to the results from the Logistic Regression model from Task R4 (binary classification: $<30$ vs. NO).
+
+**Solution:**
+
+```{r}
+# Predict class probabilities from the multinomial model
+pred_probs <- predict(multinom, newdata = test_ter, type = "probs")
+
+# COnvert `pred_probs` to a data frame with class probabilities
+df_probs <- as.data.frame(pred_probs)
+df_probs$true_class <- test_ter$TARGET
+
+# Get all class pairs for One-vs-One
+class_pairs <- combn(colnames(df_probs)[colnames(df_probs) != "true_class"], 2, simplify = FALSE)
+
+# Function to compute AUC for each class pair using predicted probabilities
+compute_ovo_auc <- function(pair, prob_data) {
+  class1 <- pair[1]
+  class2 <- pair[2]
+  
+  # Filter only observations from class1 or class2
+  pair_data <- prob_data %>% filter(true_class %in% c(class1, class2))
+  
+  # True binary label: class2 as positive
+  binary_label <- factor(pair_data$true_class, levels = c(class1, class2))
+  
+  # Score: predicted probability of class2
+  score <- pair_data[[class2]]
+  
+  # Compute AUC
+  auc_score <- AUC(y_pred = score, y_true = as.numeric(binary_label) - 1)
+  
+  return(data.frame(Pair = paste(class1, "vs", class2), AUC = auc_score))
+}
+
+# Apply to all pairs
+ovo_auc_results <- do.call(rbind, 
+                           lapply(class_pairs, compute_ovo_auc, prob_data = df_probs))
+
+# Print the results
+print(ovo_auc_results)
+```
+
+**Comparison of One-vs-One results**:
+
+We look at which pairs of classes are better separated by the model, with the fact that higher AUC means better class distinction. We see that the AUC is the highest between `NO` and `<30`, whereas the lowest between `<30` and `>30`. Hence the model separates the best between `NO` and `<30`, whereas struggling with the separation of the class `>30`.
+
+**Compared with binary classification**:
+
+The OvO AUC between `NO` and `<30` can now be compared to AUC score of the previous binary logistic model for that same pair, which is `r auc_log`. We see that the multinomial model’s AUC is worse than the binary model, suggesting that the presence of the third class confuses the model for that pair, and a binary classifier might be more focused.
+
+**Summary**: 
+
+OvO analysis allows to zoom in on model performance for each class pair. This is particularly useful when one class (like early readmission `<30`) is of greater clinical importance. Combined with the binary classification result, this gives a full picture of how well the model is achieving the core goal.
+
+## e) Conclusion
+
+Summarize your findings, addressing the following questions: What conclusions can be drawn from the results? What added value does ternary classification provide? How should the difference between the data basis for binary and ternary classification be assessed? Which models would you recommend in conclusion?
+
+**Solution:**
+
+#### 1. What conclusions can be drawn from the results?
+
+From the **One-vs-One AUC analysis**, we observe that the model’s ability to separate different class pairs varies:
+ - The AUC for `NO` vs. `<30` is comparable to the binary logistic regression result (~`r auc_log`), indicating that the multinomial model performs similarly for this key classification.
+ - Other class pairs (e.g., `<30` vs. `>30` or `>30` vs. `NO`) show lower AUC values, suggesting those pairs are more difficult to distinguish.
+
+This implies that while the model captures some structure in the data, distinguishing early readmissions (`<30`) remains challenging when more than two outcomes are considered simultaneously.
+
+#### 2. What added value does ternary classification provide?
+
+Ternary classification (predicting among `<30`, `>30`, and `NO`) offers several advantages:
+ - It reflects the real-world clinical decision-making context more closely than binary classification, where distinguishing among all outcomes can guide different interventions (e.g., urgent vs. planned vs. no readmission).
+ - Enables the model to capture inter-class relationships and conditional dependencies that may not be visible in a binary setup.
+ - Provides more granular insights, allowing stakeholders to prioritize resources based on more detailed predictions (e.g., target `<30` with highest risk scores).
+
+#### 3. How should the difference between the data basis for binary and ternary classification be assessed?
+
+ - In binary classification, instances belonging to one class are excluded (e.g., excluding `>30` when comparing `<30` vs. `NO`), which can simplify the learning task but also reduces available data.
+
+ - Ternary models leverage all data, allowing the model to learn from a broader distribution but making the classification task inherently harder due to greater class overlap and ambiguity.
+ 
+ - The AUC comparison shows that including a third class introduces complexity and may reduce performance on pairwise class separation, but the holistic understanding and broader decision support it offers is valuable.
+
+#### 4. Which models would you recommend in conclusion?
+
+Based on the trade-offs observed:
+
+ - If the primary goal is to accurately flag early readmissions (`<30`), a binary logistic regression or LASSO model focused on `<30` vs. `NO` is recommended. These models yield high AUC and focused performance, making them ideal for this task.
+
+ - If your objective includes understanding and predicting all readmission types, a multinomial logistic regression model offers greater interpretability and practical value, especially when paired with One-vs-One evaluation and probability thresholds.
+
+For the best balance, we can use the ternary model operationally, while incorporating a binary model as a supplementary tool to focus on high-risk `<30` predictions.
+
+---
+
